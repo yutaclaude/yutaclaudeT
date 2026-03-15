@@ -25,7 +25,18 @@
   <div id="root"></div>
 
   <script type="text/babel">
-const { useState } = React;
+const { useState, useEffect } = React;
+
+// ─── localStorage ヘルパー ────────────────────────────────────
+function loadLS(key, fallback) {
+  try {
+    const v = localStorage.getItem(key);
+    return v ? JSON.parse(v) : fallback;
+  } catch { return fallback; }
+}
+function saveLS(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+}
 
 
 // ─── 定数 ────────────────────────────────────────────────────
@@ -455,25 +466,66 @@ function computeViolations(sched, staff, types, daySlots, requests, prevWeekWork
 // ─── App ─────────────────────────────────────────────────────
 function App() {
   const [tab,          setTab]          = useState("auto");
-  const [staff,        setStaff]        = useState(INIT_STAFF);
-  const [types,        setTypes]        = useState(INIT_TYPES);
-  const [daySlots,     setDaySlots]     = useState({});
-  const [requests,     setRequests]     = useState({});
-  const [selStaffId,   setSelStaffId]   = useState(INIT_STAFF[0].id);
+  const [staff,        setStaff]        = useState(() => loadLS("as_staff",    INIT_STAFF));
+  const [types,        setTypes]        = useState(() => loadLS("as_types",    INIT_TYPES));
+  const [daySlots,     setDaySlots]     = useState(() => {
+    const raw = loadLS("as_daySlots", {});
+    // キーが文字列で保存されるので数値に戻す
+    return Object.fromEntries(Object.entries(raw).map(([k, v]) => [Number(k), v]));
+  });
+  const [requests,     setRequests]     = useState(() => loadLS("as_requests", {}));
+  const [selStaffId,   setSelStaffId]   = useState(() => {
+    const s = loadLS("as_staff", INIT_STAFF);
+    return s[0]?.id ?? INIT_STAFF[0].id;
+  });
   // ④ 自動生成結果をタブ移動後も保持するためにApp側で管理
   const [sched,        setSched]        = useState(null);
   const [violations,   setViolations]   = useState([]);
   const [typeCount,    setTypeCount]    = useState({});
-  const [prevWeekWork, setPrevWeekWork] = useState(
-    Object.fromEntries(INIT_STAFF.map(s => [s.id, 0]))
-  );
+  const [prevWeekWork, setPrevWeekWork] = useState(() => {
+    const s = loadLS("as_staff", INIT_STAFF);
+    return Object.fromEntries(s.map(st => [st.id, 0]));
+  });
+
+  // 変更のたびに自動保存
+  useEffect(() => saveLS("as_staff",    staff),    [staff]);
+  useEffect(() => saveLS("as_types",    types),    [types]);
+  useEffect(() => saveLS("as_daySlots", daySlots), [daySlots]);
+  useEffect(() => saveLS("as_requests", requests), [requests]);
+
+  function handleReset() {
+    if (!window.confirm("すべてのデータをリセットしますか？この操作は元に戻せません。")) return;
+    ["as_staff","as_types","as_daySlots","as_requests"].forEach(k => localStorage.removeItem(k));
+    setStaff(INIT_STAFF);
+    setTypes(INIT_TYPES);
+    setDaySlots({});
+    setRequests({});
+    setSched(null);
+    setViolations([]);
+    setTypeCount({});
+    setSelStaffId(INIT_STAFF[0].id);
+    setPrevWeekWork(Object.fromEntries(INIT_STAFF.map(s => [s.id, 0])));
+  }
 
   return (
     <div className="min-h-screen bg-gray-50">
 
       <header className="bg-blue-700 text-white px-6 py-4 shadow no-print">
-        <h1 className="text-xl font-bold">🗓 オートシフト — プロトタイプ</h1>
-        <p className="text-blue-200 text-sm">2026年3月 シフト管理</p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-xl font-bold">🗓 オートシフト — プロトタイプ</h1>
+            <p className="text-blue-200 text-sm">2026年3月 シフト管理</p>
+          </div>
+          <div className="flex items-center gap-3">
+            <span className="text-blue-200 text-xs flex items-center gap-1">
+              💾 データは自動保存されます
+            </span>
+            <button onClick={handleReset}
+              className="text-xs bg-blue-800 hover:bg-blue-900 text-blue-200 px-3 py-1.5 rounded border border-blue-600">
+              🗑 リセット
+            </button>
+          </div>
+        </div>
       </header>
 
       <nav className="bg-white border-b flex no-print">
