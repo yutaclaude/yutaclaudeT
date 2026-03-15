@@ -216,19 +216,18 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
         const aBelowMin = (a.minWorkDays||0) > 0 && getMonthWork(a.id) < a.minWorkDays ? 0 : 1;
         const bBelowMin = (b.minWorkDays||0) > 0 && getMonthWork(b.id) < b.minWorkDays ? 0 : 1;
         if (aBelowMin !== bBelowMin) return aBelowMin - bBelowMin;
-        // ⑤ ペース調整：月の進捗に対して出勤率が高いスタッフを後回しにして月末の人員不足を防ぐ
-        //   paceRate = 今月の出勤数 ÷ 出勤可能日数（= 月日数 − 必須休日 − 有給）
-        //   dayProgress = 処理中の日付 ÷ 月の日数（月のどの位置にいるか）
-        //   paceRate が dayProgress より大きい = 先走りすぎ → 後回し
-        const dayProgress = day / DAYS_IN_MONTH;
-        const paidA  = DATES.filter(d => sched[a.id][d] === "paid").length;
-        const paidB  = DATES.filter(d => sched[b.id][d] === "paid").length;
-        const maxWA  = Math.max(1, DAYS_IN_MONTH - (a.requiredDaysOff||0) - paidA);
-        const maxWB  = Math.max(1, DAYS_IN_MONTH - (b.requiredDaysOff||0) - paidB);
-        const aPace  = getMonthWork(a.id) / maxWA;
-        const bPace  = getMonthWork(b.id) / maxWB;
-        // ペース差が5%超のときだけ順位を変える（微差でのガタつき防止）
-        if (Math.abs(aPace - bPace) > 0.05) return aPace - bPace;
+        // ⑤ 緊急度調整：「残りカレンダー日数に対してあと何日出勤が必要か」の割合が
+        //   高いスタッフを優先 → 月末に向かって出勤が必要なスタッフを先に埋め、
+        //   月初に出勤が集中して月末が空になる問題を解消する
+        //   urgency = 残り必要出勤日数 ÷ 残りカレンダー日数（本日含む）
+        const daysLeft  = Math.max(1, DAYS_IN_MONTH - day + 1);
+        const paidA     = DATES.filter(d => sched[a.id][d] === "paid").length;
+        const paidB     = DATES.filter(d => sched[b.id][d] === "paid").length;
+        const maxWA     = Math.max(1, DAYS_IN_MONTH - (a.requiredDaysOff||0) - paidA);
+        const maxWB     = Math.max(1, DAYS_IN_MONTH - (b.requiredDaysOff||0) - paidB);
+        const urgencyA  = Math.max(0, maxWA - getMonthWork(a.id)) / daysLeft;
+        const urgencyB  = Math.max(0, maxWB - getMonthWork(b.id)) / daysLeft;
+        if (Math.abs(urgencyA - urgencyB) > 0.01) return urgencyB - urgencyA; // 緊急度高い方を優先
         // ⑥ typeCount均等化
         return (typeCount[a.id][typeId] || 0) - (typeCount[b.id][typeId] || 0);
       });
