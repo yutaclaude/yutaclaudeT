@@ -1,0 +1,1675 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>オートシフト — シフト管理</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React 18 -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- Babel (JSX transform) -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    @media print {
+      @page { size: A4 landscape; margin: 7mm; }
+      .no-print { display: none !important; }
+      .print-only { display: block !important; }
+      body { background: white !important; font-family: sans-serif; }
+    }
+    .print-only { display: none; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+const { useState } = React;
+
+
+// ─── 定数 ────────────────────────────────────────────────────
+const YEAR = 2026, MONTH = 3;
+const NEXT_MONTH = 4, NEXT_YEAR = 2026;
+const DAYS_IN_MONTH = new Date(YEAR, MONTH, 0).getDate();
+const DATES = Array.from({ length: DAYS_IN_MONTH }, (_, i) => i + 1);
+const HOLIDAYS = new Set([20]); // 春分の日（自動生成・シフト枠設定用、運用月固定）
+
+// 向こう半年分の希望入力用・月別祝日マップ（2026年）
+const HOLIDAYS_2026 = {
+  3: [20],         // 春分の日
+  4: [29],         // 昭和の日
+  5: [3, 4, 5, 6], // 憲法記念日・みどりの日・こどもの日・振替
+  6: [],
+  7: [20],         // 海の日（第3月曜）
+  8: [11],         // 山の日
+};
+function getHolidaysForMonth(year, month) {
+  if (year === 2026) return new Set(HOLIDAYS_2026[month] || []);
+  return new Set();
+}
+
+function getDow(day)      { return new Date(YEAR, MONTH - 1, day).getDay(); }
+function getDayLabel(day) { return ["日","月","火","水","木","金","土"][getDow(day)]; }
+function isWeekend(day)   { const d = getDow(day); return d === 0 || d === 6; }
+function isHoliday(day)   { return HOLIDAYS.has(day); }
+function isWEH(day)       { return isWeekend(day) || isHoliday(day); }
+
+// 週の開始土曜日を返す（土曜始まり・金曜終わりの週）
+function getWeekSatStart(day) {
+  const dow = getDow(day); // 0=日 … 5=金 6=土
+  return day - (dow === 6 ? 0 : dow + 1);
+}
+
+const WD_COUNT  = DATES.filter(d => !isWEH(d)).length;
+const WEH_COUNT = DATES.filter(d =>  isWEH(d)).length;
+
+// ─── 初期データ ───────────────────────────────────────────────
+// role: ""=一般 / "店長" / "副店長" / "チーフ" — 役職スタッフは毎日最低1名の出勤を保証
+const ROLE_OPTIONS = [
+  { value: "",     label: "一般",   color: "#9ca3af" },
+  { value: "店長",  label: "店長",   color: "#dc2626" },
+  { value: "副店長", label: "副店長", color: "#ea580c" },
+  { value: "チーフ", label: "チーフ", color: "#7c3aed" },
+];
+const KEY_ROLES = new Set(["店長", "副店長", "チーフ"]);
+
+const INIT_STAFF = [
+  { id: 1, name: "田中 さくら", role: "店長",  maxConsecutive: 3, weeklyDaysOff: 2, requiredDaysOff: 8, minWorkDays: 0, notes: "" },
+  { id: 2, name: "鈴木 一郎",   role: "チーフ", maxConsecutive: 4, weeklyDaysOff: 2, requiredDaysOff: 8, minWorkDays: 0, notes: "" },
+  { id: 3, name: "佐藤 美咲",   role: "",       maxConsecutive: 3, weeklyDaysOff: 2, requiredDaysOff: 8, minWorkDays: 0, notes: "" },
+  { id: 4, name: "山田 健太",   role: "",       maxConsecutive: 5, weeklyDaysOff: 1, requiredDaysOff: 6, minWorkDays: 0, notes: "" },
+];
+
+const INIT_TYPES = [
+  { id: "A", name: "早番", start: "09:00", end: "15:00", color: "#3b82f6" },
+  { id: "B", name: "遅番", start: "15:00", end: "21:00", color: "#f59e0b" },
+  { id: "C", name: "通し", start: "09:00", end: "21:00", color: "#10b981" },
+];
+
+const MAIN_TABS = [
+  { id: "staff",    label: "① スタッフ設定" },
+  { id: "slots",    label: "② シフト枠設定" },
+  { id: "requests", label: "③ 希望入力"     },
+  { id: "auto",     label: "④ 自動生成・印刷", highlight: true },
+];
+
+// 有給の表示設定
+const PAID_COLOR = "#7c3aed";
+
+// ─── 自動生成アルゴリズム ─────────────────────────────────────
+// prevWeekWork: { [staffId]: number } = 前月の最終週（土〜）に出勤した日数
+function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
+  const sched     = {};
+  const typeCount = {}; // 均等化用カウンタ: [staffId][typeId]
+
+  staff.forEach(s => {
+    sched[s.id]     = {};
+    typeCount[s.id] = {};
+    types.forEach(t => { typeCount[s.id][t.id] = 0; });
+    DATES.forEach(d => {
+      const r = requests[s.id]?.[d];
+      sched[s.id][d] = (r === "off" || r === "paid") ? r : null;
+    });
+  });
+
+  const violations = [];
+  const isWorking  = v => v && v !== "off" && v !== "paid";
+
+  // 連勤カウント（day の前日まで）
+  function getConsecutive(sid, day) {
+    let n = 0;
+    for (let d = day - 1; d >= 1; d--) {
+      if (isWorking(sched[sid][d])) n++; else break;
+    }
+    return n;
+  }
+
+  // 土〜金の週の出勤数（day より前、前月分も加算）
+  function getWeekWork(sid, day) {
+    const wStart = getWeekSatStart(day);
+    // 週が前月にまたがる場合は prevWeekWork を加算
+    let n = wStart < 1 ? (prevWeekWork[sid] || 0) : 0;
+    for (let d = Math.max(1, wStart); d < day; d++) {
+      if (isWorking(sched[sid][d])) n++;
+    }
+    return n;
+  }
+
+  // 月累計出勤数
+  function getMonthWork(sid) {
+    return DATES.filter(d => isWorking(sched[sid][d])).length;
+  }
+
+  // 限界値：スタッフ数 − 2（同時に休める最大人数が2名のため）
+  const ASSIGN_LIMIT = Math.max(1, staff.length - 2);
+
+  // 割り当て可否（月の休日数・週の休日数・連勤をすべて厳守）
+  function canAssign(s, day) {
+    if (sched[s.id][day] !== null)                       return false; // 今日すでに決定済み
+    if (getConsecutive(s.id, day) >= s.maxConsecutive)   return false; // 連勤上限
+    if (getWeekWork(s.id, day) >= 7 - s.weeklyDaysOff)  return false; // 週の休日確保（土〜金）
+    // 有給は必須休日に含めない → 有給日数を別枠で確保（出勤可能日数 = 月日数 − 必須休日 − 有給日数）
+    const paidDays = DATES.filter(d => sched[s.id][d] === "paid").length;
+    const maxWork  = DAYS_IN_MONTH - (s.requiredDaysOff || 0) - paidDays;
+    if (getMonthWork(s.id) >= maxWork)                   return false; // 月の必須休日数【絶対優先】
+    return true;
+  }
+
+  // 事前チェック：スロット要件が限界値を超えていないか
+  DATES.forEach(day => {   // ← 事前チェック用（順序不問）
+    (daySlots[day] || []).forEach(({ typeId, required }) => {
+      if (required > ASSIGN_LIMIT) {
+        const typeName = types.find(t => t.id === typeId)?.name || typeId;
+        violations.push({
+          day, typeId, severity: "warning",
+          message: `${MONTH}/${day}（${getDayLabel(day)}）${typeName}：必要数${required}名が限界値${ASSIGN_LIMIT}名（スタッフ${staff.length}名−2）を超えています`,
+        });
+      }
+    });
+  });
+
+  // 日ごとに割り当て（土日祝を先に処理して人員を確保、次に平日 ── 月の休日数は絶対に破らない）
+  const sortedDates = [
+    ...DATES.filter(d => isWEH(d)),   // 土日祝を優先
+    ...DATES.filter(d => !isWEH(d)),  // 平日を後回し
+  ];
+  sortedDates.forEach(day => {
+    const slots = [...(daySlots[day] || [])].sort((a, b) => {
+      const sa = types.find(t => t.id === a.typeId)?.start || "";
+      const sb = types.find(t => t.id === b.typeId)?.start || "";
+      return sa.localeCompare(sb); // 早番→遅番の順に処理
+    });
+
+    slots.forEach(({ typeId, required }) => {
+      // 全制約を守った候補のみ収集（フォールバックなし）
+      const pool = staff.filter(s => canAssign(s, day));
+      // 優先順: 必出 > 役職カバー必要時は役職スタッフ優先 > できれば休み後回し > minWorkDays未達 > typeCount均等化
+      const hasRoleCovered = staff.some(x => KEY_ROLES.has(x.role) && isWorking(sched[x.id][day]));
+      pool.sort((a, b) => {
+        // ① 必出は最優先
+        const aReq = requests[a.id]?.[day] === "required" ? 0 : 1;
+        const bReq = requests[b.id]?.[day] === "required" ? 0 : 1;
+        if (aReq !== bReq) return aReq - bReq;
+        // ② 役職カバーが未確保なら役職スタッフを優先
+        if (!hasRoleCovered) {
+          const aRole = KEY_ROLES.has(a.role) ? 0 : 1;
+          const bRole = KEY_ROLES.has(b.role) ? 0 : 1;
+          if (aRole !== bRole) return aRole - bRole;
+        }
+        // ③ できれば休み → 後回し
+        const ap = requests[a.id]?.[day] === "prefer" ? 1 : 0;
+        const bp = requests[b.id]?.[day] === "prefer" ? 1 : 0;
+        if (ap !== bp) return ap - bp;
+        // ④ minWorkDays未達 → 優先
+        const aBelowMin = (a.minWorkDays||0) > 0 && getMonthWork(a.id) < a.minWorkDays ? 0 : 1;
+        const bBelowMin = (b.minWorkDays||0) > 0 && getMonthWork(b.id) < b.minWorkDays ? 0 : 1;
+        if (aBelowMin !== bBelowMin) return aBelowMin - bBelowMin;
+        // ⑤ typeCount均等化
+        return (typeCount[a.id][typeId] || 0) - (typeCount[b.id][typeId] || 0);
+      });
+      const toAssign = pool.slice(0, required);
+
+      toAssign.forEach(s => {
+        sched[s.id][day] = typeId;
+        typeCount[s.id][typeId]++;
+      });
+
+      if (toAssign.length < required) {
+        const typeName = types.find(t => t.id === typeId)?.name || typeId;
+        const isCritical = toAssign.length < ASSIGN_LIMIT;
+        violations.push({
+          day, typeId,
+          severity: isCritical ? "critical" : "error",
+          message: `${MONTH}/${day}（${getDayLabel(day)}）${typeName}：${required}名必要 → ${toAssign.length}名（月の休日数優先のため）${isCritical ? " ⚠ 限界値未満！" : ""}`,
+        });
+      }
+    });
+  });
+
+  // ─ 必須勤務日数の補完パス ─────────────────────────────────
+  // メインループ後にminWorkDays未達のスタッフへ追加割り当てを試みる
+  // 土日祝優先・typeCount均等化維持・全制約厳守
+  const fillDates = [
+    ...DATES.filter(d => isWEH(d)),
+    ...DATES.filter(d => !isWEH(d)),
+  ];
+  staff.filter(s => (s.minWorkDays||0) > 0).forEach(s => {
+    fillDates.forEach(day => {
+      if (getMonthWork(s.id) >= s.minWorkDays) return; // 達成済みならスキップ
+      if (!canAssign(s, day)) return;                  // 制約違反ならスキップ
+      const slots = daySlots[day] || [];
+      if (slots.length === 0) return;                  // シフト枠なし
+      // typeCountが最も少ないシフト種別を選んで均等化を維持
+      const bestSlot = [...slots].sort((a, b) =>
+        (typeCount[s.id][a.typeId]||0) - (typeCount[s.id][b.typeId]||0)
+      )[0];
+      sched[s.id][day] = bestSlot.typeId;
+      typeCount[s.id][bestSlot.typeId]++;
+    });
+  });
+
+  // ─ 役職カバー確保パス ─────────────────────────────────────
+  // 毎日最低1名の店長/副店長/チーフが出勤するよう追加割り当て
+  const keyRoleStaff = staff.filter(s => KEY_ROLES.has(s.role));
+  if (keyRoleStaff.length > 0) {
+    const roleFillDates = [
+      ...DATES.filter(d => isWEH(d)),
+      ...DATES.filter(d => !isWEH(d)),
+    ];
+    roleFillDates.forEach(day => {
+      if (keyRoleStaff.some(s => isWorking(sched[s.id][day]))) return; // 既にカバー済み
+      const slots = daySlots[day] || [];
+      if (slots.length === 0) return;
+      // 割り当て可能な役職スタッフを探す（typeCount均等化を維持）
+      const available = keyRoleStaff.filter(s => canAssign(s, day));
+      if (available.length === 0) return; // 後で事後チェックが拾う
+      available.sort((a, b) => {
+        const aMin = Math.min(...slots.map(sl => typeCount[a.id][sl.typeId]||0));
+        const bMin = Math.min(...slots.map(sl => typeCount[b.id][sl.typeId]||0));
+        return aMin - bMin;
+      });
+      const s = available[0];
+      const bestSlot = [...slots].sort((a,b) =>
+        (typeCount[s.id][a.typeId]||0) - (typeCount[s.id][b.typeId]||0)
+      )[0];
+      sched[s.id][day] = bestSlot.typeId;
+      typeCount[s.id][bestSlot.typeId]++;
+    });
+  }
+
+  // ─ 必出補完パス ───────────────────────────────────────────
+  // 「必出」申請がある日に未割り当てのスタッフを強制的に割り当て
+  staff.forEach(s => {
+    DATES.forEach(day => {
+      if (requests[s.id]?.[day] !== "required") return;
+      if (isWorking(sched[s.id][day])) return; // 既に出勤割り当て済み
+      const slots = daySlots[day] || [];
+      if (slots.length === 0) {
+        violations.push({ day, staffId: s.id, severity: "critical",
+          message: `${s.name}：${MONTH}/${day}（${getDayLabel(day)}）必出ですがシフト枠がありません` });
+        return;
+      }
+      // 通常canAssign、月の勤務日数上限のみが原因なら必出で上書き
+      let ok = canAssign(s, day);
+      if (!ok) {
+        const paidDays2 = DATES.filter(d => sched[s.id][d] === "paid").length;
+        const maxWork2  = DAYS_IN_MONTH - (s.requiredDaysOff||0) - paidDays2;
+        const onlyMonthLimit = getMonthWork(s.id) >= maxWork2
+          && getConsecutive(s.id, day) < s.maxConsecutive
+          && getWeekWork(s.id, day)    < 7 - s.weeklyDaysOff;
+        if (onlyMonthLimit) {
+          ok = true;
+          violations.push({ day, staffId: s.id, severity: "warning",
+            message: `${s.name}：${MONTH}/${day} 必出により月の勤務日数上限を超過` });
+        }
+      }
+      if (!ok) {
+        violations.push({ day, staffId: s.id, severity: "critical",
+          message: `${s.name}：${MONTH}/${day}（${getDayLabel(day)}）必出ですが連勤・週休制約により割り当て不可` });
+        return;
+      }
+      const bestSlot = [...slots].sort((a,b) =>
+        (typeCount[s.id][a.typeId]||0) - (typeCount[s.id][b.typeId]||0)
+      )[0];
+      sched[s.id][day] = bestSlot.typeId;
+      typeCount[s.id][bestSlot.typeId]++;
+    });
+  });
+
+  // ─ 事後チェック ─
+  staff.forEach(s => {
+    // 連勤超過チェック
+    let consec = 0;
+    DATES.forEach(day => {
+      if (isWorking(sched[s.id][day])) {
+        consec++;
+        if (consec > s.maxConsecutive)
+          violations.push({ day, staffId: s.id, severity: "warning",
+            message: `${s.name}：${MONTH}/${day}に${consec}連勤（上限${s.maxConsecutive}日）` });
+      } else consec = 0;
+    });
+
+    // 月の必須休日不足チェック（有給は含めない）
+    const offDays = DATES.filter(d => { const v = sched[s.id][d]; return v === "off" || v === null; }).length;
+    if (offDays < (s.requiredDaysOff || 0))
+      violations.push({ staffId: s.id, severity: "warning",
+        message: `${s.name}：月の休日（有給除く） ${offDays}日（必須 ${s.requiredDaysOff}日）` });
+
+    // 月の必須勤務日数不足チェック（補完パス後もなお未達 → 制約により達成不可）
+    const actualWork = DATES.filter(d => isWorking(sched[s.id][d])).length;
+    if ((s.minWorkDays||0) > 0 && actualWork < s.minWorkDays)
+      violations.push({ staffId: s.id, severity: "error",
+        message: `${s.name}：月の出勤日数 ${actualWork}日（必須 ${s.minWorkDays}日）— 制約上これ以上割り当て不可` });
+
+    // 週（土〜金）の休日不足チェック
+    const weekStarts = [...new Set(DATES.map(d => getWeekSatStart(d)))];
+    weekStarts.forEach(wStart => {
+      const weekDaysInMonth = Array.from({length:7}, (_,i)=>wStart+i).filter(d=>d>=1&&d<=DAYS_IN_MONTH);
+      const workInMonth     = weekDaysInMonth.filter(d => isWorking(sched[s.id][d])).length;
+      const prevWork        = wStart < 1 ? (prevWeekWork[s.id] || 0) : 0;
+      const totalWork       = workInMonth + prevWork;
+      const totalWeekLen    = weekDaysInMonth.length + (wStart < 1 ? -wStart : 0);
+      if (totalWork > totalWeekLen - s.weeklyDaysOff)
+        violations.push({ staffId: s.id, severity: "warning",
+          message: `${s.name}：${MONTH}/${Math.max(1,wStart)}週 週の休日不足（${totalWeekLen - totalWork}日/${s.weeklyDaysOff}日必要）` });
+    });
+  });
+
+  // 役職カバー不足チェック（パス後もカバーできなかった日）
+  if (keyRoleStaff.length > 0) {
+    DATES.forEach(day => {
+      if (!keyRoleStaff.some(s => isWorking(sched[s.id][day]))) {
+        violations.push({ day, severity: "critical",
+          message: `${MONTH}/${day}（${getDayLabel(day)}）：店長・副店長・チーフが不在 ⚠` });
+      }
+    });
+  }
+
+  return { sched, violations, typeCount };
+}
+
+// ─── 事後違反チェック（手動編集後の再計算用）──────────────────
+// generateSchedule と同じ事後チェックロジックをスタンドアロン化
+function computeViolations(sched, staff, types, daySlots, requests, prevWeekWork = {}) {
+  const violations = [];
+  const isWorking  = v => v && v !== "off" && v !== "paid";
+  const ASSIGN_LIMIT = Math.max(1, staff.length - 2);
+
+  // 1. シフト枠の充足チェック（日×シフト種別）
+  DATES.forEach(day => {
+    (daySlots[day] || []).forEach(({ typeId, required }) => {
+      if (required <= 0) return;
+      const assigned = staff.filter(s => sched[s.id]?.[day] === typeId).length;
+      if (assigned < required) {
+        const typeName = types.find(t => t.id === typeId)?.name || typeId;
+        const isCritical = assigned < ASSIGN_LIMIT;
+        violations.push({
+          day, typeId,
+          severity: isCritical ? "critical" : "error",
+          message: `${MONTH}/${day}（${getDayLabel(day)}）${typeName}：${required}名必要 → ${assigned}名${isCritical ? " ⚠ 限界値未満！" : ""}`,
+        });
+      }
+    });
+  });
+
+  // 2. スタッフ別チェック
+  staff.forEach(s => {
+    // 連勤超過
+    let consec = 0;
+    DATES.forEach(day => {
+      if (isWorking(sched[s.id]?.[day])) {
+        consec++;
+        if (consec > s.maxConsecutive)
+          violations.push({ day, staffId: s.id, severity: "warning",
+            message: `${s.name}：${MONTH}/${day}に${consec}連勤（上限${s.maxConsecutive}日）` });
+      } else consec = 0;
+    });
+
+    // 月の必須休日不足（有給は含めない）
+    const offDays = DATES.filter(d => { const v = sched[s.id]?.[d]; return v === "off" || v === null; }).length;
+    if (offDays < (s.requiredDaysOff || 0))
+      violations.push({ staffId: s.id, severity: "warning",
+        message: `${s.name}：月の休日（有給除く） ${offDays}日（必須 ${s.requiredDaysOff}日）` });
+
+    // 月の必須勤務日数不足
+    const actualWork = DATES.filter(d => isWorking(sched[s.id]?.[d])).length;
+    if ((s.minWorkDays || 0) > 0 && actualWork < s.minWorkDays)
+      violations.push({ staffId: s.id, severity: "error",
+        message: `${s.name}：月の出勤日数 ${actualWork}日（必須 ${s.minWorkDays}日）— 制約上これ以上割り当て不可` });
+
+    // 週（土〜金）の休日不足
+    const weekStarts = [...new Set(DATES.map(d => getWeekSatStart(d)))];
+    weekStarts.forEach(wStart => {
+      const weekDaysInMonth = Array.from({length:7}, (_,i) => wStart+i).filter(d => d>=1 && d<=DAYS_IN_MONTH);
+      const workInMonth  = weekDaysInMonth.filter(d => isWorking(sched[s.id]?.[d])).length;
+      const prevWork     = wStart < 1 ? (prevWeekWork[s.id] || 0) : 0;
+      const totalWork    = workInMonth + prevWork;
+      const totalWeekLen = weekDaysInMonth.length + (wStart < 1 ? -wStart : 0);
+      if (totalWork > totalWeekLen - s.weeklyDaysOff)
+        violations.push({ staffId: s.id, severity: "warning",
+          message: `${s.name}：${MONTH}/${Math.max(1,wStart)}週 週の休日不足（${totalWeekLen - totalWork}日/${s.weeklyDaysOff}日必要）` });
+    });
+
+    // 必出が未出勤
+    DATES.forEach(day => {
+      if (requests[s.id]?.[day] === "required" && !isWorking(sched[s.id]?.[day]))
+        violations.push({ day, staffId: s.id, severity: "critical",
+          message: `${s.name}：${MONTH}/${day}（${getDayLabel(day)}）必出ですが出勤になっていません` });
+    });
+  });
+
+  // 3. 役職カバー不足チェック
+  const keyRoleStaff = staff.filter(s => KEY_ROLES.has(s.role));
+  if (keyRoleStaff.length > 0) {
+    DATES.forEach(day => {
+      if (!keyRoleStaff.some(s => isWorking(sched[s.id]?.[day])))
+        violations.push({ day, severity: "critical",
+          message: `${MONTH}/${day}（${getDayLabel(day)}）：店長・副店長・チーフが不在 ⚠` });
+    });
+  }
+
+  return violations;
+}
+
+// ─── App ─────────────────────────────────────────────────────
+function App() {
+  const [tab,          setTab]          = useState("auto");
+  const [staff,        setStaff]        = useState(INIT_STAFF);
+  const [types,        setTypes]        = useState(INIT_TYPES);
+  const [daySlots,     setDaySlots]     = useState({});
+  const [requests,     setRequests]     = useState({});
+  const [selStaffId,   setSelStaffId]   = useState(INIT_STAFF[0].id);
+  // ④ 自動生成結果をタブ移動後も保持するためにApp側で管理
+  const [sched,        setSched]        = useState(null);
+  const [violations,   setViolations]   = useState([]);
+  const [typeCount,    setTypeCount]    = useState({});
+  const [prevWeekWork, setPrevWeekWork] = useState(
+    Object.fromEntries(INIT_STAFF.map(s => [s.id, 0]))
+  );
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+
+      <header className="bg-blue-700 text-white px-6 py-4 shadow no-print">
+        <h1 className="text-xl font-bold">🗓 オートシフト — プロトタイプ</h1>
+        <p className="text-blue-200 text-sm">2026年3月 シフト管理</p>
+      </header>
+
+      <nav className="bg-white border-b flex no-print">
+        {MAIN_TABS.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)}
+            className={`px-6 py-3 font-medium text-sm border-b-2 transition-colors ${
+              tab === t.id
+                ? "border-blue-600 text-blue-700 bg-blue-50"
+                : t.highlight
+                  ? "border-transparent text-emerald-600 hover:text-emerald-700 font-semibold"
+                  : "border-transparent text-gray-500 hover:text-gray-700"
+            }`}>
+            {t.label}
+          </button>
+        ))}
+      </nav>
+
+      <main className="p-6 max-w-6xl mx-auto no-print">
+        {tab === "staff"    && <StaffTab    staff={staff} setStaff={setStaff} />}
+        {tab === "slots"    && <SlotsTab    types={types} setTypes={setTypes} daySlots={daySlots} setDaySlots={setDaySlots} staff={staff} requests={requests[`${YEAR}-${MONTH}`]||{}} />}
+        {tab === "requests" && <RequestsTab staff={staff} requests={requests} setRequests={setRequests} selStaffId={selStaffId} setSelStaffId={setSelStaffId} />}
+        {tab === "auto"     && <AutoGenTab  staff={staff} types={types} daySlots={daySlots} requests={requests[`${YEAR}-${MONTH}`]||{}}
+                               sched={sched} setSched={setSched}
+                               violations={violations} setViolations={setViolations}
+                               typeCount={typeCount} setTypeCount={setTypeCount}
+                               prevWeekWork={prevWeekWork} setPrevWeekWork={setPrevWeekWork} />}
+      </main>
+    </div>
+  );
+}
+
+// ─── ④ AutoGenTab ────────────────────────────────────────────
+function AutoGenTab({ staff, types, daySlots, requests,
+                      sched, setSched, violations, setViolations,
+                      typeCount, setTypeCount,
+                      prevWeekWork, setPrevWeekWork }) {
+  const [editCell,      setEditCell]     = useState(null);
+  const [showPrevInput, setShowPrevInput] = useState(false);
+
+  function handleGenerate() {
+    const result = generateSchedule(staff, types, daySlots, requests, prevWeekWork);
+    setSched(result.sched);
+    setViolations(result.violations);
+    setTypeCount(result.typeCount);
+    setEditCell(null);
+  }
+
+  function changeCell(staffId, day, val) {
+    const newSched = { ...sched, [staffId]: { ...sched[staffId], [day]: val } };
+    setSched(newSched);
+    // 手動修正後に違反を再計算 → 解消済みの項目は自動的に消える
+    setViolations(computeViolations(newSched, staff, types, daySlots, requests, prevWeekWork));
+    setEditCell(null);
+  }
+
+  const isWorking = v => v && v !== "off" && v !== "paid";
+
+  function workCount(staffId) {
+    return sched ? DATES.filter(d => isWorking(sched[staffId]?.[d])).length : 0;
+  }
+
+  // セル表示情報
+  function cellInfo(staffId, day) {
+    const val  = sched?.[staffId]?.[day];
+    const type = val && val !== "off" && val !== "paid" ? types.find(t => t.id === val) : null;
+    if (val === "paid") return { label: "有", fg: PAID_COLOR,  bg: "#ede9fe" };
+    if (val === "off")  return { label: "希望", fg: "#ef4444",   bg: "#fee2e2" };
+    if (type)           return { label: type.name.slice(0,1), fg: type.color, bg: type.color+"25" };
+    if ((daySlots[day]||[]).length > 0) return { label: "休", fg: "#d1d5db", bg: "#fafafa" };
+    return { label: "—", fg: "#e5e7eb", bg: "#fff" };
+  }
+
+  const violSet = new Set(
+    violations.filter(v => v.staffId && v.day).map(v => `${v.staffId}-${v.day}`)
+  );
+
+  return (
+    <div>
+      {/* ─ コントロール ─ */}
+      <div className="flex items-start justify-between mb-5">
+        <div>
+          <h2 className="text-lg font-bold text-gray-800">④ シフト自動生成・印刷</h2>
+          <p className="text-sm text-gray-500 mt-0.5">
+            制約チェックしながらシフトを割り当て。セルをクリックして手動修正できます。
+          </p>
+        </div>
+        <div className="flex gap-3">
+          <button onClick={() => setShowPrevInput(v => !v)}
+            className="bg-gray-100 text-gray-600 px-4 py-2.5 rounded-lg text-sm font-medium hover:bg-gray-200 border border-gray-200">
+            ⚙️ 前月またぎ設定
+          </button>
+          <button onClick={handleGenerate}
+            className="bg-emerald-600 text-white px-5 py-2.5 rounded-lg font-semibold hover:bg-emerald-700 shadow">
+            ⚡ シフトを自動生成
+          </button>
+          {sched && (
+            <button onClick={() => window.print()}
+              className="bg-gray-700 text-white px-5 py-2.5 rounded-lg font-semibold hover:bg-gray-800 shadow">
+              🖨️ A4横で印刷・PDF保存
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* ─ 前月またぎ設定パネル ─ */}
+      {showPrevInput && (
+        <div className="mb-5 bg-amber-50 border border-amber-200 rounded-xl p-4">
+          <h3 className="font-semibold text-amber-800 mb-1">前月（2月）最終週の出勤日数</h3>
+          <p className="text-xs text-amber-600 mb-3">
+            月末の週（土〜金）が月をまたぐ場合、前月分の出勤日数を入力してください。
+            週の休日数制約の計算に使用します。
+          </p>
+          <div className="flex flex-wrap gap-4">
+            {staff.map(s => (
+              <div key={s.id} className="flex items-center gap-2 bg-white rounded-lg px-3 py-2 border border-amber-200">
+                <span className="text-sm font-medium text-gray-700">{s.name}</span>
+                <div className="flex items-center gap-1">
+                  <button onClick={() => setPrevWeekWork(p => ({...p, [s.id]: Math.max(0,(p[s.id]||0)-1)}))}
+                    className="w-6 h-6 bg-gray-100 rounded-full text-sm font-bold hover:bg-gray-200 flex items-center justify-center">−</button>
+                  <span className="w-5 text-center font-bold text-amber-700">{prevWeekWork[s.id]||0}</span>
+                  <button onClick={() => setPrevWeekWork(p => ({...p, [s.id]: Math.min(7,(p[s.id]||0)+1)}))}
+                    className="w-6 h-6 bg-gray-100 rounded-full text-sm font-bold hover:bg-gray-200 flex items-center justify-center">＋</button>
+                  <span className="text-xs text-gray-500 ml-1">日</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ─ 未生成の案内 ─ */}
+      {!sched && (
+        <div className="bg-white rounded-xl border-2 border-dashed border-gray-200 p-16 text-center">
+          <div className="text-5xl mb-4">📋</div>
+          <p className="text-gray-500 font-medium">「シフトを自動生成」ボタンを押すと</p>
+          <p className="text-gray-500">②で設定したシフト枠と③の希望をもとに割り当てを行います</p>
+          <div className="mt-6 text-xs text-gray-400 space-y-1">
+            <p>✓ 休み希望・有給は必ず反映　✓ 最大連勤日数を超えない</p>
+            <p>✓ 土曜〜金曜で最低{staff[0]?.weeklyDaysOff || 2}日の休日を確保</p>
+            <p className="text-amber-500 font-medium">★ 月の必須休日数を絶対優先（シフト枠が不足しても休日数を守る）</p>
+            <p>✓ 早番・通しを各スタッフに均等配分　✓ できれば休みを可能な限り考慮</p>
+            <p>⚠ 1日に割り当て可能な上限は（スタッフ数−2）名</p>
+          </div>
+        </div>
+      )}
+
+      {sched && (
+        <>
+          {/* ─ 違反アラート ─ */}
+          {violations.length > 0 ? (
+            <div className="mb-4 bg-red-50 border border-red-200 rounded-xl p-4">
+              <h3 className="font-bold text-red-700 mb-2">🚨 {violations.length}件の問題（要確認）</h3>
+              <div className="space-y-1 max-h-28 overflow-y-auto">
+                {violations.map((v, i) => (
+                  <div key={i} className={`text-xs px-3 py-1.5 rounded flex items-start gap-2 ${
+                    v.severity === "critical" ? "bg-red-200 text-red-900 font-bold border border-red-400"
+                    : v.severity === "error"  ? "bg-red-100 text-red-700"
+                    : "bg-yellow-100 text-yellow-700"
+                  }`}>
+                    {v.severity === "critical" ? "🔴" : v.severity === "error" ? "❌" : "⚠️"} {v.message}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="mb-4 bg-green-50 border border-green-200 rounded-xl p-3 text-green-700 text-sm font-medium">
+              ✅ 全スタッフの制約を満たすシフトが生成できました！
+            </div>
+          )}
+
+          {/* ─ シフト表グリッド ─ */}
+          <div className="bg-white rounded-xl shadow overflow-auto mb-4">
+            <div className="p-4 border-b flex items-center justify-between">
+              <h3 className="font-bold text-gray-800">2026年3月 シフト表（画面プレビュー）</h3>
+              <div className="flex items-center gap-3 text-xs flex-wrap">
+                {types.map(t => (
+                  <span key={t.id} className="flex items-center gap-1">
+                    <span className="w-3 h-3 rounded-sm inline-block" style={{backgroundColor:t.color}} />
+                    {t.name}（{t.start}〜{t.end}）
+                  </span>
+                ))}
+                <span className="flex items-center gap-1">
+                  <span className="w-3 h-3 rounded-sm inline-block" style={{backgroundColor:PAID_COLOR}} />有給
+                </span>
+                <span className="text-gray-400 ml-1">💡 セルクリックで修正</span>
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="text-xs border-collapse" style={{minWidth:"900px"}}>
+                <thead>
+                  <tr className="bg-gray-50">
+                    <th className="border border-gray-200 px-3 py-2 text-left font-semibold text-gray-700 sticky left-0 bg-gray-50 z-10" style={{minWidth:"90px"}}>氏名</th>
+                    {DATES.map(day => {
+                      const dow = getDow(day);
+                      const isH = isHoliday(day);
+                      return (
+                        <th key={day} className={`border border-gray-200 py-1 text-center font-semibold`}
+                          style={{width:"30px", minWidth:"30px",
+                            background: dow===0||isH ? "#fee2e2" : dow===6 ? "#dbeafe" : "#f9fafb",
+                            color: dow===0||isH ? "#b91c1c" : dow===6 ? "#1d4ed8" : "#374151"
+                          }}>
+                          <div>{day}</div>
+                          <div style={{fontSize:"9px"}}>{isH?"祝":getDayLabel(day)}</div>
+                        </th>
+                      );
+                    })}
+                    <th className="border border-gray-200 px-2 py-2 text-center font-semibold bg-gray-100 text-gray-700">出勤<br/>日数</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {staff.map((s, si) => (
+                    <tr key={s.id} style={{background: si%2===0?"#fff":"#f9fafb"}}>
+                      <td className="border border-gray-200 px-2 py-1.5 font-medium text-gray-800 sticky left-0 z-10"
+                        style={{background: si%2===0?"#fff":"#f9fafb"}}>
+                        {s.name}
+                      </td>
+                      {DATES.map(day => {
+                        const ci  = cellInfo(s.id, day);
+                        const vio = violSet.has(`${s.id}-${day}`);
+                        const isEdit = editCell?.staffId === s.id && editCell?.day === day;
+                        return (
+                          <td key={day}
+                            className={`border border-gray-200 text-center p-0 relative cursor-pointer ${vio ? "ring-2 ring-red-400 ring-inset" : ""}`}
+                            onClick={() => setEditCell(isEdit ? null : {staffId:s.id, day})}>
+                            {isEdit && (
+                              <div className="absolute top-0 left-0 z-30 bg-white border border-blue-400 rounded shadow-xl p-1"
+                                style={{minWidth:"85px"}}>
+                                {types.map(t => (
+                                  <button key={t.id}
+                                    onClick={e => { e.stopPropagation(); changeCell(s.id, day, t.id); }}
+                                    className="block w-full text-left text-xs px-2 py-1 hover:bg-blue-50 rounded"
+                                    style={{color: t.color}}>
+                                    ● {t.name}
+                                  </button>
+                                ))}
+                                <button onClick={e => { e.stopPropagation(); changeCell(s.id, day, "paid"); }}
+                                  className="block w-full text-left text-xs px-2 py-1 hover:bg-purple-50 rounded"
+                                  style={{color: PAID_COLOR}}>● 有給</button>
+                                <button onClick={e => { e.stopPropagation(); changeCell(s.id, day, "off"); }}
+                                  className="block w-full text-left text-xs px-2 py-1 hover:bg-gray-50 rounded text-gray-500">
+                                  ● 休み
+                                </button>
+                              </div>
+                            )}
+                            <div className="py-1.5 px-0.5 text-center font-semibold"
+                              style={{backgroundColor:ci.bg, color:ci.fg, fontSize:"11px"}}>
+                              {ci.label}
+                            </div>
+                          </td>
+                        );
+                      })}
+                      <td className="border border-gray-200 text-center font-bold text-gray-700 bg-gray-100">
+                        {workCount(s.id)}
+                      </td>
+                    </tr>
+                  ))}
+
+                  {/* 必要人数確認行 */}
+                  {types.map(t => (
+                    <tr key={t.id} style={{background:"#f8fafc"}}>
+                      <td className="border border-gray-200 px-2 py-1 text-xs font-semibold sticky left-0 bg-gray-50"
+                        style={{color:t.color}}>{t.name}必要数</td>
+                      {DATES.map(day => {
+                        const slot     = (daySlots[day]||[]).find(s=>s.typeId===t.id);
+                        const required = slot?.required || 0;
+                        const assigned = staff.filter(s => sched[s.id]?.[day] === t.id).length;
+                        const ok       = required===0 || assigned>=required;
+                        return (
+                          <td key={day} className="border border-gray-200 text-center py-1"
+                            style={{fontSize:"9px",
+                              background: !ok ? "#fee2e2" : required>0 ? "#f0fdf4" : "",
+                              color: ok ? "#16a34a" : "#dc2626", fontWeight: ok?"normal":"bold"}}>
+                            {required > 0 ? `${assigned}/${required}` : <span style={{color:"#d1d5db"}}>—</span>}
+                          </td>
+                        );
+                      })}
+                      <td className="border border-gray-200" />
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* ─ シフト種別バランス統計 ─ */}
+          <div className="bg-white rounded-xl shadow p-4 mb-3">
+            <h3 className="font-bold text-gray-800 mb-3">📊 シフト種別バランス（均等化確認）</h3>
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-gray-50">
+                  <th className="px-3 py-2 text-left text-gray-600 font-semibold">スタッフ</th>
+                  {types.map(t => (
+                    <th key={t.id} className="px-3 py-2 text-center font-semibold" style={{color:t.color}}>{t.name}</th>
+                  ))}
+                  <th className="px-3 py-2 text-center text-purple-600 font-semibold">有給</th>
+                  <th className="px-3 py-2 text-center text-gray-600 font-semibold">出勤計</th>
+                  <th className="px-3 py-2 text-center text-gray-400 font-semibold">休日計</th>
+                  <th className="px-3 py-2 text-center text-gray-600 font-semibold">必須休日</th>
+                </tr>
+              </thead>
+              <tbody>
+                {staff.map((s, si) => {
+                  const paidDays    = DATES.filter(d => sched[s.id]?.[d] === "paid").length;
+                  const workDays    = workCount(s.id);
+                  // 有給は「休日計」・「必須休日」チェックに含めない
+                  const realOffDays = DAYS_IN_MONTH - workDays - paidDays;
+                  const ok          = realOffDays >= (s.requiredDaysOff || 0);
+                  return (
+                    <tr key={s.id} className={`border-t ${si%2===0?"bg-white":"bg-gray-50"}`}>
+                      <td className="px-3 py-2 font-medium text-gray-800">{s.name}</td>
+                      {types.map(t => {
+                        const cnt = typeCount[s.id]?.[t.id] || 0;
+                        // 同じシフト種別の最大・最小を計算
+                        const allCnts = staff.map(x => typeCount[x.id]?.[t.id] || 0);
+                        const maxC = Math.max(...allCnts), minC = Math.min(...allCnts);
+                        const isMax = cnt === maxC && maxC > minC;
+                        const isMin = cnt === minC && maxC > minC;
+                        return (
+                          <td key={t.id} className="px-3 py-2 text-center">
+                            <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-bold ${
+                              isMax ? "bg-orange-100 text-orange-700" : isMin ? "bg-blue-50 text-blue-600" : "text-gray-700"
+                            }`}>{cnt}</span>
+                          </td>
+                        );
+                      })}
+                      <td className="px-3 py-2 text-center">
+                        {paidDays > 0
+                          ? <span className="text-purple-600 font-bold">{paidDays}</span>
+                          : <span className="text-gray-300">0</span>}
+                      </td>
+                      <td className="px-3 py-2 text-center font-bold text-gray-700">{workDays}</td>
+                      <td className="px-3 py-2 text-center text-gray-500">{realOffDays}</td>
+                      <td className="px-3 py-2 text-center">
+                        <span className={`text-xs font-bold ${ok ? "text-green-600" : "text-red-600"}`}>
+                          {ok ? `✓ ${realOffDays}日` : `⚠ ${realOffDays}/${s.requiredDaysOff}日`}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <p className="text-xs text-gray-400 mt-2">
+              🟠 多め　🔵 少なめ（均等化の参考として表示）
+            </p>
+          </div>
+
+          <div className="text-xs text-gray-400 flex gap-6">
+            <span>🔴 赤枠：制約違反</span>
+            <span>❌ 赤背景：必要人数不足</span>
+            <span>✅ 緑背景：必要人数充足</span>
+          </div>
+        </>
+      )}
+
+      {/* ─ 印刷専用エリア ─ */}
+      {sched && <PrintArea sched={sched} staff={staff} types={types} daySlots={daySlots} violations={violations} />}
+    </div>
+  );
+}
+
+// ─── 印刷専用（A4横） ─────────────────────────────────────────
+function PrintArea({ sched, staff, types, daySlots, violations }) {
+  const isWorking = v => v && v !== "off" && v !== "paid";
+  const workCount = sid => DATES.filter(d => isWorking(sched[sid]?.[d])).length;
+  const violStaff = new Set(violations.filter(v=>v.staffId&&v.day).map(v=>`${v.staffId}-${v.day}`));
+
+  function slotStatus(day, typeId) {
+    const slot = (daySlots[day]||[]).find(s=>s.typeId===typeId);
+    if (!slot) return null;
+    return { required: slot.required, assigned: staff.filter(s=>sched[s.id]?.[day]===typeId).length };
+  }
+
+  return (
+    <div className="print-only" style={{fontFamily:"sans-serif",color:"#111"}}>
+      {/* ヘッダー */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",
+        marginBottom:"4px",borderBottom:"2px solid #1d4ed8",paddingBottom:"3px"}}>
+        <div>
+          <div style={{fontSize:"15px",fontWeight:"bold",color:"#1d4ed8"}}>
+            2026年3月　シフト表
+          </div>
+          <div style={{fontSize:"8px",color:"#555",marginTop:"1px",display:"flex",gap:"10px"}}>
+            {types.map(t=>(
+              <span key={t.id} style={{color:t.color}}>● {t.name}（{t.start}〜{t.end}）</span>
+            ))}
+            <span style={{color:PAID_COLOR}}>● 有（有給）</span>
+            <span style={{color:"#9ca3af"}}>休＝休み</span>
+          </div>
+        </div>
+        <div style={{fontSize:"8px",color:"#888",textAlign:"right"}}>
+          {violations.length>0?`⚠ ${violations.length}件の調整が必要`:"✓ 制約すべて充足"}
+          <br/>作成日：{new Date().toLocaleDateString("ja-JP")}
+        </div>
+      </div>
+
+      {/* 本体テーブル */}
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:"8px",tableLayout:"fixed"}}>
+        <colgroup>
+          <col style={{width:"50px"}} />
+          {DATES.map(d=><col key={d} />)}
+          <col style={{width:"18px"}} />
+        </colgroup>
+        <thead>
+          <tr>
+            <th style={{border:"1px solid #aaa",padding:"2px 3px",background:"#dbeafe",
+              textAlign:"left",fontSize:"7px"}}>氏名</th>
+            {DATES.map(day => {
+              const dow=getDow(day), isH=isHoliday(day);
+              return (
+                <th key={day} style={{border:"1px solid #aaa",padding:"1px 0",textAlign:"center",
+                  lineHeight:1.2,
+                  background: dow===0||isH?"#fee2e2":dow===6?"#dbeafe":"#f3f4f6",
+                  color: dow===0||isH?"#b91c1c":dow===6?"#1d4ed8":"#374151"}}>
+                  <div style={{fontWeight:"bold"}}>{day}</div>
+                  <div style={{fontSize:"7px"}}>{isH?"祝":getDayLabel(day)}</div>
+                </th>
+              );
+            })}
+            <th style={{border:"1px solid #aaa",padding:"1px",background:"#e5e7eb",
+              textAlign:"center",fontSize:"7px"}}>出勤</th>
+          </tr>
+        </thead>
+        <tbody>
+          {staff.map((s, si) => (
+            <tr key={s.id} style={{background:si%2===0?"#fff":"#f9fafb"}}>
+              <td style={{border:"1px solid #aaa",padding:"2px 3px",fontWeight:"600",
+                fontSize:"8px",whiteSpace:"nowrap",overflow:"hidden"}}>{s.name}</td>
+              {DATES.map(day => {
+                const val  = sched[s.id]?.[day];
+                const type = isWorking(val) ? types.find(t=>t.id===val) : null;
+                const vio  = violStaff.has(`${s.id}-${day}`);
+                const dow  = getDow(day);
+                const isWE = dow===0||dow===6||isHoliday(day);
+                const bg   = vio ? "#fca5a5"
+                           : val==="paid" ? "#ede9fe"
+                           : type ? type.color+"28"
+                           : isWE ? "#fafafa" : "#fff";
+                const fg   = val==="paid" ? PAID_COLOR
+                           : type ? type.color
+                           : "#bbb";
+                return (
+                  <td key={day} style={{border:"1px solid #aaa",textAlign:"center",
+                    padding:"2px 0",background:bg,color:fg,
+                    fontWeight:type||val==="paid"?"700":"400",fontSize:"9px",
+                    outline:vio?"2px solid #ef4444":"none"}}>
+                    {val==="paid" ? "有" : type ? type.name.slice(0,1) : "休"}
+                  </td>
+                );
+              })}
+              <td style={{border:"1px solid #aaa",textAlign:"center",
+                fontWeight:"bold",background:"#e5e7eb",fontSize:"8px"}}>
+                {workCount(s.id)}
+              </td>
+            </tr>
+          ))}
+
+          {/* 充足状況行 */}
+          <tr><td colSpan={DAYS_IN_MONTH+2} style={{border:"1px solid #ccc",padding:"1px 4px",
+            fontSize:"7px",color:"#9ca3af",fontStyle:"italic",background:"#f3f4f6"}}>
+            ▼ 各日の充足状況（配置数／必要数）
+          </td></tr>
+          {types.map(t => (
+            <tr key={t.id} style={{background:"#fafafa"}}>
+              <td style={{border:"1px solid #ccc",padding:"2px 3px",
+                color:t.color,fontWeight:"600",fontSize:"7px"}}>{t.name}</td>
+              {DATES.map(day => {
+                const st = slotStatus(day, t.id);
+                if (!st) return <td key={day} style={{border:"1px solid #ddd",textAlign:"center",
+                  fontSize:"7px",color:"#d1d5db"}}>—</td>;
+                const ok = st.assigned >= st.required;
+                return <td key={day} style={{border:"1px solid #ddd",textAlign:"center",
+                  fontSize:"7px",fontWeight:ok?"normal":"bold",
+                  color:ok?"#16a34a":"#dc2626",background:ok?"#f0fdf4":"#fee2e2"}}>
+                  {st.assigned}/{st.required}
+                </td>;
+              })}
+              <td style={{border:"1px solid #ddd"}} />
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      {/* フッター */}
+      <div style={{marginTop:"4px",display:"flex",justifyContent:"space-between",
+        fontSize:"7px",color:"#9ca3af",borderTop:"1px solid #e5e7eb",paddingTop:"3px"}}>
+        <span style={{color:"#dc2626"}}>
+          {violations.length>0 &&
+            `⚠ ${violations.slice(0,3).map(v=>(v.severity==="critical"?"🔴":v.severity==="error"?"❌":"⚠")+v.message.slice(0,30)).join("　")}${violations.length>3?` 他${violations.length-3}件`:""}`
+          }
+        </span>
+        <span>管理者確認：＿＿＿＿＿　掲示日：＿＿＿月＿＿＿日</span>
+      </div>
+    </div>
+  );
+}
+
+// ─── ① StaffTab ──────────────────────────────────────────────
+function StaffTab({ staff, setStaff }) {
+  const [editId,  setEditId]  = useState(null);
+  const [form,    setForm]    = useState({});
+  const [showAdd, setShowAdd] = useState(false);
+  const [newS, setNewS] = useState({name:"",role:"",maxConsecutive:3,weeklyDaysOff:2,requiredDaysOff:8,minWorkDays:0,notes:""});
+
+  function startEdit(s) { setEditId(s.id); setForm({...s}); }
+  function saveEdit()   { setStaff(p=>p.map(s=>s.id===editId?{...form}:s)); setEditId(null); }
+  function addStaff()   {
+    setStaff(p=>[...p,{...newS,id:Date.now()}]);
+    setNewS({name:"",role:"",maxConsecutive:3,weeklyDaysOff:2,requiredDaysOff:8,minWorkDays:0,notes:""});
+    setShowAdd(false);
+  }
+
+  const sel = n => Array.from({length:n},(_, i)=>i+1);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-lg font-bold text-gray-800">スタッフ勤務条件設定</h2>
+        <button onClick={()=>setShowAdd(true)}
+          className="bg-blue-600 text-white text-sm px-4 py-2 rounded hover:bg-blue-700">
+          ＋ スタッフ追加
+        </button>
+      </div>
+      <div className="mb-4 p-3 bg-blue-50 rounded text-sm text-blue-700">
+        💡 連勤上限・週の休日数・月の必須休日数を設定。シフト自動生成時にこの条件が適用されます。
+      </div>
+
+      <div className="bg-white rounded-lg shadow overflow-hidden">
+        <table className="w-full text-sm">
+          <thead className="bg-gray-100 text-gray-600">
+            <tr>
+              <th className="px-4 py-3 text-left">氏名</th>
+              <th className="px-4 py-3 text-center">役職</th>
+              <th className="px-4 py-3 text-center">最大連勤</th>
+              <th className="px-4 py-3 text-center">週の休日数<br/><span className="font-normal text-xs text-gray-400">（土〜金）</span></th>
+              <th className="px-4 py-3 text-center bg-amber-50 text-amber-700">月の必須<br/>休日数</th>
+              <th className="px-4 py-3 text-center bg-emerald-50 text-emerald-700">月の必須<br/>勤務日数</th>
+              <th className="px-4 py-3 text-left">備考</th>
+              <th className="px-4 py-3 text-center">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {staff.map(s => (
+              <tr key={s.id} className="border-t hover:bg-gray-50">
+                {editId === s.id ? (
+                  <>
+                    <td className="px-4 py-2"><input className="border rounded px-2 py-1 w-32" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} /></td>
+                    <td className="px-4 py-2 text-center">
+                      <select className="border rounded px-2 py-1 text-xs" value={form.role||""} onChange={e=>setForm(f=>({...f,role:e.target.value}))}>
+                        {ROLE_OPTIONS.map(r=><option key={r.value} value={r.value}>{r.label}</option>)}
+                      </select>
+                    </td>
+                    <td className="px-4 py-2 text-center">
+                      <select className="border rounded px-2 py-1" value={form.maxConsecutive} onChange={e=>setForm(f=>({...f,maxConsecutive:+e.target.value}))}>
+                        {[2,3,4,5,6].map(n=><option key={n}>{n}</option>)}</select><span className="ml-1 text-gray-500">日</span>
+                    </td>
+                    <td className="px-4 py-2 text-center">
+                      <select className="border rounded px-2 py-1" value={form.weeklyDaysOff} onChange={e=>setForm(f=>({...f,weeklyDaysOff:+e.target.value}))}>
+                        {[1,2,3].map(n=><option key={n}>{n}</option>)}</select><span className="ml-1 text-gray-500">日</span>
+                    </td>
+                    <td className="px-4 py-2 text-center bg-amber-50">
+                      <select className="border rounded px-2 py-1 border-amber-300" value={form.requiredDaysOff} onChange={e=>setForm(f=>({...f,requiredDaysOff:+e.target.value}))}>
+                        {sel(15).map(n=><option key={n}>{n}</option>)}</select><span className="ml-1 text-gray-500">日</span>
+                    </td>
+                    <td className="px-4 py-2 text-center bg-emerald-50">
+                      <select className="border rounded px-2 py-1 border-emerald-300" value={form.minWorkDays||0} onChange={e=>setForm(f=>({...f,minWorkDays:+e.target.value}))}>
+                        {[0,...sel(25)].map(n=><option key={n} value={n}>{n===0?"なし":`${n}日`}</option>)}</select>
+                    </td>
+                    <td className="px-4 py-2"><input className="border rounded px-2 py-1 w-full" value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))} /></td>
+                    <td className="px-4 py-2 text-center space-x-1">
+                      <button onClick={saveEdit} className="bg-green-600 text-white text-xs px-3 py-1 rounded">保存</button>
+                      <button onClick={()=>setEditId(null)} className="bg-gray-300 text-xs px-3 py-1 rounded">取消</button>
+                    </td>
+                  </>
+                ) : (
+                  <>
+                    <td className="px-4 py-3 font-medium">{s.name}</td>
+                    <td className="px-4 py-3 text-center">
+                      {(() => {
+                        const ro = ROLE_OPTIONS.find(r=>r.value===(s.role||""));
+                        return s.role
+                          ? <span className="px-2 py-0.5 rounded-full text-xs font-bold text-white" style={{backgroundColor:ro?.color||"#6b7280"}}>{s.role}</span>
+                          : <span className="text-xs text-gray-400">—</span>;
+                      })()}
+                    </td>
+                    <td className="px-4 py-3 text-center">
+                      <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${s.maxConsecutive<=3?"bg-red-100 text-red-700":"bg-gray-100 text-gray-600"}`}>
+                        {s.maxConsecutive}日まで</span>
+                    </td>
+                    <td className="px-4 py-3 text-center">{s.weeklyDaysOff}日</td>
+                    <td className="px-4 py-3 text-center bg-amber-50">
+                      <span className="bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full text-xs font-bold">
+                        {s.requiredDaysOff}日</span>
+                    </td>
+                    <td className="px-4 py-3 text-center bg-emerald-50">
+                      {(s.minWorkDays||0)>0
+                        ? <span className="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full text-xs font-bold">{s.minWorkDays}日</span>
+                        : <span className="text-gray-300 text-xs">—</span>}
+                    </td>
+                    <td className="px-4 py-3 text-gray-500 text-xs">{s.notes||"—"}</td>
+                    <td className="px-4 py-3 text-center space-x-1">
+                      <button onClick={()=>startEdit(s)} className="bg-blue-100 text-blue-700 text-xs px-3 py-1 rounded">編集</button>
+                      <button onClick={()=>setStaff(p=>p.filter(x=>x.id!==s.id))} className="bg-red-100 text-red-600 text-xs px-3 py-1 rounded">削除</button>
+                    </td>
+                  </>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {showAdd && (
+        <div className="mt-4 bg-white rounded-lg shadow p-4 border-l-4 border-blue-400">
+          <h3 className="font-bold text-gray-700 mb-3">新しいスタッフを追加</h3>
+          <div className="grid grid-cols-2 gap-3">
+            <div><label className="text-xs text-gray-500 block mb-1">氏名</label>
+              <input className="border rounded px-3 py-2 w-full" placeholder="例：高橋 花子" value={newS.name} onChange={e=>setNewS(s=>({...s,name:e.target.value}))} /></div>
+            <div><label className="text-xs text-gray-500 block mb-1">役職</label>
+              <select className="border rounded px-3 py-2 w-full" value={newS.role||""} onChange={e=>setNewS(s=>({...s,role:e.target.value}))}>
+                {ROLE_OPTIONS.map(r=><option key={r.value} value={r.value}>{r.label}</option>)}
+              </select></div>
+            <div><label className="text-xs text-gray-500 block mb-1">最大連勤</label>
+              <select className="border rounded px-3 py-2 w-full" value={newS.maxConsecutive} onChange={e=>setNewS(s=>({...s,maxConsecutive:+e.target.value}))}>
+                {[2,3,4,5,6].map(n=><option key={n}>{n}日</option>)}</select></div>
+            <div><label className="text-xs text-gray-500 block mb-1">週の休日数（土〜金）</label>
+              <select className="border rounded px-3 py-2 w-full" value={newS.weeklyDaysOff} onChange={e=>setNewS(s=>({...s,weeklyDaysOff:+e.target.value}))}>
+                {[1,2,3].map(n=><option key={n}>{n}日</option>)}</select></div>
+            <div><label className="text-xs text-amber-600 block mb-1 font-medium">月の必須休日数</label>
+              <select className="border border-amber-300 rounded px-3 py-2 w-full" value={newS.requiredDaysOff} onChange={e=>setNewS(s=>({...s,requiredDaysOff:+e.target.value}))}>
+                {sel(15).map(n=><option key={n}>{n}日</option>)}</select></div>
+            <div><label className="text-xs text-emerald-600 block mb-1 font-medium">月の必須勤務日数</label>
+              <select className="border border-emerald-300 rounded px-3 py-2 w-full" value={newS.minWorkDays||0} onChange={e=>setNewS(s=>({...s,minWorkDays:+e.target.value}))}>
+                {[0,...sel(25)].map(n=><option key={n} value={n}>{n===0?"なし（制限なし）":`${n}日`}</option>)}</select></div>
+            <div className="col-span-2"><label className="text-xs text-gray-500 block mb-1">備考</label>
+              <input className="border rounded px-3 py-2 w-full" value={newS.notes} onChange={e=>setNewS(s=>({...s,notes:e.target.value}))} /></div>
+          </div>
+          <div className="mt-3 flex gap-2">
+            <button onClick={addStaff} disabled={!newS.name} className="bg-blue-600 text-white px-4 py-2 rounded text-sm disabled:opacity-40 hover:bg-blue-700">追加する</button>
+            <button onClick={()=>setShowAdd(false)} className="bg-gray-200 text-gray-700 px-4 py-2 rounded text-sm">キャンセル</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── ② SlotsTab ──────────────────────────────────────────────
+function SlotsTab({ types, setTypes, daySlots, setDaySlots, staff, requests }) {
+  const [subTab,      setSubTab]      = useState("bulk");
+  // 曜日別テンプレート: 0=日 1=月 … 6=土
+  const [dowTpl,      setDowTpl]      = useState({0:[],1:[],2:[],3:[],4:[],5:[],6:[]});
+  const [selDow,      setSelDow]      = useState(1); // 選択中の曜日
+  const [applyDone,   setApplyDone]   = useState(false);
+  const [copyDone,    setCopyDone]    = useState(false);
+  const [selDay,      setSelDay]      = useState(1);
+  const [editTypeId,  setEditTypeId]  = useState(null);
+  const [typeForm,    setTypeForm]    = useState({});
+  const [showAddType, setShowAddType] = useState(false);
+  const [newType,     setNewType]     = useState({name:"",start:"09:00",end:"17:00",color:"#6366f1"});
+
+  function applyBulk() {
+    const hasAny = Object.values(dowTpl).some(t => t.length > 0);
+    if (!hasAny) return;
+    const u = {...daySlots};
+    DATES.forEach(d => {
+      const t = dowTpl[getDow(d)] || [];
+      if (t.length > 0) u[d] = t.map(x => ({...x}));
+    });
+    setDaySlots(u); setApplyDone(true); setTimeout(()=>setApplyDone(false),3000);
+  }
+
+  const curSlots = daySlots[selDay] || [];
+  function addSlotToDay(typeId) {
+    if (curSlots.find(s=>s.typeId===typeId)) return;
+    setDaySlots(p=>({...p,[selDay]:[...(p[selDay]||[]),{typeId,required:2}]}));
+  }
+  function removeSlotFromDay(typeId) {
+    setDaySlots(p=>({...p,[selDay]:(p[selDay]||[]).filter(s=>s.typeId!==typeId)}));
+  }
+  function updateRequired(typeId,val) {
+    setDaySlots(p=>({...p,[selDay]:(p[selDay]||[]).map(s=>s.typeId===typeId?{...s,required:Math.max(1,val)}:s)}));
+  }
+
+  function startEditType(t) { setEditTypeId(t.id); setTypeForm({...t}); }
+  function saveType()        { setTypes(p=>p.map(t=>t.id===editTypeId?{...typeForm}:t)); setEditTypeId(null); }
+  function addType()         {
+    if (!newType.name) return;
+    setTypes(p=>[...p,{...newType,id:`T${Date.now()}`}]);
+    setNewType({name:"",start:"09:00",end:"17:00",color:"#6366f1"}); setShowAddType(false);
+  }
+
+  const firstDow = new Date(YEAR, MONTH-1, 1).getDay();
+  const cells = Array(firstDow).fill(null).concat(DATES);
+  const weeks=[]; for(let i=0;i<cells.length;i+=7) weeks.push(cells.slice(i,i+7));
+
+  // この日の有給者リスト
+  const paidStaff = staff?.filter(s => requests?.[s.id]?.[selDay] === "paid") || [];
+
+  return (
+    <div className="grid grid-cols-3 gap-6">
+      <div className="col-span-2">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-bold text-gray-800">シフト枠設定</h2>
+          <div className="flex gap-2">
+            {[["bulk","一括設定"],["individual","個別調整"]].map(([id,label])=>(
+              <button key={id} onClick={()=>setSubTab(id)}
+                className={`px-4 py-1.5 text-sm rounded-full font-medium ${subTab===id?"bg-blue-600 text-white":"bg-gray-100 text-gray-600 hover:bg-gray-200"}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {subTab==="bulk" && (
+          <div className="space-y-4">
+            {/* 曜日選択タブ */}
+            <div>
+              <p className="text-xs text-gray-500 mb-2">曜日を選んでシフト枠の最低人数を設定します</p>
+              <div className="flex gap-1">
+                {["日","月","火","水","木","金","土"].map((label, dow) => {
+                  const cnt = dowTpl[dow]?.length || 0;
+                  const isWknd = dow===0||dow===6;
+                  const activeClass = dow===0 ? "bg-red-500 text-white shadow"
+                    : dow===6 ? "bg-blue-500 text-white shadow"
+                    : "bg-indigo-600 text-white shadow";
+                  const inactiveClass = dow===0 ? "bg-red-50 text-red-500 hover:bg-red-100"
+                    : dow===6 ? "bg-blue-50 text-blue-500 hover:bg-blue-100"
+                    : "bg-gray-100 text-gray-600 hover:bg-gray-200";
+                  return (
+                    <button key={dow} onClick={()=>setSelDow(dow)}
+                      className={`flex-1 py-2 rounded-lg text-sm font-bold transition-all relative ${selDow===dow ? activeClass : inactiveClass}`}>
+                      {label}
+                      {cnt > 0 && (
+                        <span className={`absolute -top-1 -right-1 text-xs w-4 h-4 flex items-center justify-center rounded-full font-bold ${selDow===dow?"bg-white text-gray-700":"bg-gray-400 text-white"}`}>
+                          {cnt}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* 選択中の曜日テンプレート */}
+            <TemplateSection
+              title={`${"日月火水木金土"[selDow]}曜日テンプレート`}
+              emoji={selDow===0||selDow===6?"🏖":"📅"}
+              colorKey={selDow===0?"red":selDow===6?"blue":"indigo"}
+              dayCount={DATES.filter(d=>getDow(d)===selDow).length}
+              template={dowTpl[selDow]||[]}
+              setTemplate={t=>setDowTpl(p=>({...p,[selDow]:typeof t==="function"?t(p[selDow]||[]):t}))}
+              types={types}
+            />
+
+            {/* 平日まとめてコピーボタン（平日選択中かつ設定済みの場合） */}
+            {selDow>=1&&selDow<=5&&(dowTpl[selDow]||[]).length>0&&(
+              <button onClick={()=>{
+                const src=dowTpl[selDow];
+                setDowTpl(p=>{const n={...p};[1,2,3,4,5].forEach(d=>{if(d!==selDow)n[d]=src.map(x=>({...x}));});return n;});
+              }} className="w-full text-xs py-2 rounded-lg border border-dashed border-indigo-300 text-indigo-700 hover:bg-indigo-50 transition-colors">
+                📋 この設定を平日（月〜金）すべてにコピー
+              </button>
+            )}
+
+            <div className="flex gap-3 mt-2">
+              <button onClick={applyBulk} disabled={!Object.values(dowTpl).some(t=>t.length>0)}
+                className={`flex-1 py-3 rounded-lg font-medium transition-all ${applyDone?"bg-green-50 border-2 border-green-500 text-green-700":"bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40"}`}>
+                {applyDone?"✓ 2026年3月に適用しました！":"✅ 2026年3月に一括適用"}
+              </button>
+              <button onClick={()=>{setCopyDone(true);setTimeout(()=>setCopyDone(false),3000);}}
+                className={`flex-1 py-3 rounded-lg font-medium border-2 transition-all ${copyDone?"bg-green-50 border-green-500 text-green-700":"bg-white border-blue-300 text-blue-700 hover:bg-blue-50"}`}>
+                {copyDone?`✓ ${NEXT_YEAR}年${NEXT_MONTH}月にコピーしました！`:`📋 来月（${NEXT_MONTH}月）にルールをコピー`}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {subTab==="individual" && (
+          <div>
+            <p className="text-sm text-gray-500 mb-3">日付をクリックして個別にシフト枠を調整できます。</p>
+            <div className="bg-white rounded-lg shadow p-4 mb-4">
+              <div className="grid grid-cols-7 gap-1 mb-1">
+                {["日","月","火","水","木","金","土"].map((d,i)=>(
+                  <div key={d} className={`text-center text-xs font-bold py-1 ${i===0?"text-red-500":i===6?"text-blue-500":"text-gray-500"}`}>{d}</div>
+                ))}
+              </div>
+              {weeks.map((week,wi)=>(
+                <div key={wi} className="grid grid-cols-7 gap-1 mb-1">
+                  {week.map((day,di)=>{
+                    if(!day) return <div key={di}/>;
+                    const slots=daySlots[day]||[], isSel=selDay===day, dow=di%7;
+                    return (
+                      <button key={di} onClick={()=>setSelDay(day)}
+                        className={`rounded p-1 text-left text-xs border transition-all ${isSel?"border-blue-500 bg-blue-50 shadow":"border-transparent hover:bg-gray-50"}`}>
+                        <div className={`font-bold ${dow===0?"text-red-500":dow===6?"text-blue-500":isHoliday(day)?"text-red-400":"text-gray-700"}`}>
+                          {day}{isHoliday(day)&&<span className="ml-0.5 text-red-400" style={{fontSize:"7px"}}>祝</span>}
+                        </div>
+                        <div className="space-y-0.5 mt-0.5">
+                          {slots.map(sl=>{const t=types.find(t=>t.id===sl.typeId);
+                            return t?<div key={sl.typeId} className="text-white rounded px-1 truncate" style={{backgroundColor:t.color,fontSize:"8px"}}>{t.name} {sl.required}名</div>:null;})}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+
+            {/* 選択日の設定 */}
+            <div className="bg-white rounded-lg shadow p-4">
+              <h3 className="font-semibold text-gray-700 mb-3">
+                {MONTH}月{selDay}日（{getDayLabel(selDay)}）
+                {isHoliday(selDay)&&<span className="ml-2 text-xs bg-red-100 text-red-600 px-2 py-0.5 rounded-full">祝日</span>}
+                のシフト枠
+              </h3>
+
+              {/* 有給者表示 */}
+              {paidStaff.length > 0 && (
+                <div className="mb-3 flex items-center gap-2 text-sm p-2 rounded-lg"
+                  style={{background:"#ede9fe",color:PAID_COLOR}}>
+                  <span className="font-bold">有給取得者：</span>
+                  {paidStaff.map(s=>(
+                    <span key={s.id} className="bg-white px-2 py-0.5 rounded-full text-xs font-medium shadow-sm">{s.name}</span>
+                  ))}
+                </div>
+              )}
+
+              <div className="space-y-2">
+                {types.map(t=>{
+                  const added=curSlots.find(s=>s.typeId===t.id);
+                  return (
+                    <div key={t.id} className="flex items-center justify-between p-2 rounded border"
+                      style={{backgroundColor:added?t.color+"18":"",borderColor:added?t.color+"88":"#e5e7eb"}}>
+                      <div className="flex items-center gap-2">
+                        <div className="w-3 h-3 rounded-full" style={{backgroundColor:t.color}}/>
+                        <span className="text-sm font-medium">{t.name}</span>
+                        <span className="text-xs text-gray-400">{t.start}〜{t.end}</span>
+                      </div>
+                      {added?(
+                        <div className="flex items-center gap-1">
+                          <button onClick={()=>updateRequired(t.id,added.required-1)} className="w-7 h-7 bg-gray-100 rounded-full font-bold hover:bg-gray-200">−</button>
+                          <span className="text-sm font-bold w-6 text-center">{added.required}</span>
+                          <button onClick={()=>updateRequired(t.id,added.required+1)} className="w-7 h-7 bg-gray-100 rounded-full font-bold hover:bg-gray-200">＋</button>
+                          <span className="text-xs text-gray-500 ml-1">名</span>
+                          <button onClick={()=>removeSlotFromDay(t.id)} className="ml-2 text-red-400 text-sm hover:text-red-600">✕</button>
+                        </div>
+                      ):(
+                        <button onClick={()=>addSlotToDay(t.id)} className="text-xs bg-gray-100 px-3 py-1 rounded hover:bg-gray-200">追加</button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* シフト種別管理 */}
+      <div>
+        <h2 className="text-lg font-bold text-gray-800 mb-4">シフト種別管理</h2>
+        <div className="bg-white rounded-lg shadow p-4">
+          <p className="text-xs text-gray-400 mb-3">名前・時間・カラーを変更できます</p>
+          <div className="space-y-2">
+            {types.map(t=>(
+              <div key={t.id}>
+                {editTypeId===t.id?(
+                  <div className="p-3 bg-gray-50 rounded-lg border border-blue-200 space-y-2">
+                    <input className="border rounded px-2 py-1 w-full text-sm" value={typeForm.name} onChange={e=>setTypeForm(f=>({...f,name:e.target.value}))} />
+                    <div className="grid grid-cols-2 gap-2">
+                      <div><label className="text-xs text-gray-500 block mb-0.5">開始時間</label>
+                        <input type="time" className="border rounded px-2 py-1 w-full text-sm" value={typeForm.start} onChange={e=>setTypeForm(f=>({...f,start:e.target.value}))} /></div>
+                      <div><label className="text-xs text-gray-500 block mb-0.5">終了時間</label>
+                        <input type="time" className="border rounded px-2 py-1 w-full text-sm" value={typeForm.end} onChange={e=>setTypeForm(f=>({...f,end:e.target.value}))} /></div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <label className="text-xs text-gray-500">カラー</label>
+                      <input type="color" className="w-9 h-9 rounded cursor-pointer border" value={typeForm.color} onChange={e=>setTypeForm(f=>({...f,color:e.target.value}))} />
+                    </div>
+                    <div className="flex gap-2">
+                      <button onClick={saveType} className="flex-1 bg-green-600 text-white text-xs py-1.5 rounded">保存</button>
+                      <button onClick={()=>setEditTypeId(null)} className="flex-1 bg-gray-200 text-xs py-1.5 rounded">取消</button>
+                    </div>
+                  </div>
+                ):(
+                  <div className="flex items-center justify-between p-2.5 rounded-lg hover:bg-gray-50 group border border-transparent hover:border-gray-200">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-4 h-4 rounded-md shadow-sm" style={{backgroundColor:t.color}}/>
+                      <div>
+                        <div className="text-sm font-semibold text-gray-800">{t.name}</div>
+                        <div className="text-xs text-gray-400">{t.start} 〜 {t.end}</div>
+                      </div>
+                    </div>
+                    <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button onClick={()=>startEditType(t)} className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded">編集</button>
+                      <button onClick={()=>setTypes(p=>p.filter(x=>x.id!==t.id))} className="text-xs bg-red-100 text-red-600 px-2 py-1 rounded">削除</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+          {showAddType?(
+            <div className="mt-3 p-3 bg-blue-50 rounded-lg border border-blue-200 space-y-2">
+              <input className="border rounded px-2 py-1 w-full text-sm" value={newType.name} onChange={e=>setNewType(n=>({...n,name:e.target.value}))} placeholder="例：夜番" />
+              <div className="grid grid-cols-2 gap-2">
+                <div><label className="text-xs text-gray-500 block mb-0.5">開始</label>
+                  <input type="time" className="border rounded px-2 py-1 w-full text-sm" value={newType.start} onChange={e=>setNewType(n=>({...n,start:e.target.value}))} /></div>
+                <div><label className="text-xs text-gray-500 block mb-0.5">終了</label>
+                  <input type="time" className="border rounded px-2 py-1 w-full text-sm" value={newType.end} onChange={e=>setNewType(n=>({...n,end:e.target.value}))} /></div>
+              </div>
+              <div className="flex items-center gap-2">
+                <label className="text-xs text-gray-500">カラー</label>
+                <input type="color" className="w-9 h-9 rounded cursor-pointer border" value={newType.color} onChange={e=>setNewType(n=>({...n,color:e.target.value}))} />
+              </div>
+              <div className="flex gap-2">
+                <button onClick={addType} disabled={!newType.name} className="flex-1 bg-blue-600 text-white text-xs py-1.5 rounded disabled:opacity-40">追加する</button>
+                <button onClick={()=>setShowAddType(false)} className="flex-1 bg-gray-200 text-xs py-1.5 rounded">取消</button>
+              </div>
+            </div>
+          ):(
+            <button onClick={()=>setShowAddType(true)} className="mt-3 w-full text-sm text-blue-600 border border-dashed border-blue-300 py-2 rounded hover:bg-blue-50">
+              ＋ シフト種別を追加
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── TemplateSection ─────────────────────────────────────────
+function TemplateSection({ title, emoji, colorKey, dayCount, template, setTemplate, types }) {
+  function addToTpl(typeId)  { if(!template.find(t=>t.typeId===typeId)) setTemplate(p=>[...p,{typeId,required:2}]); }
+  function removeFromTpl(typeId) { setTemplate(p=>p.filter(t=>t.typeId!==typeId)); }
+  function updateReq(typeId,val) { setTemplate(p=>p.map(t=>t.typeId===typeId?{...t,required:Math.max(1,val)}:t)); }
+  const palette = colorKey==="blue"
+    ? { bg:"#eff6ff", border:"#bfdbfe", head:"text-blue-800", badge:"bg-blue-100 text-blue-700" }
+    : colorKey==="red"
+    ? { bg:"#fff1f2", border:"#fecdd3", head:"text-red-800",  badge:"bg-red-100 text-red-700"   }
+    : colorKey==="indigo"
+    ? { bg:"#eef2ff", border:"#c7d2fe", head:"text-indigo-800", badge:"bg-indigo-100 text-indigo-700" }
+    : { bg:"#fff7ed", border:"#fed7aa", head:"text-orange-800", badge:"bg-orange-100 text-orange-700" };
+  return (
+    <div className="rounded-xl p-4 border" style={{backgroundColor:palette.bg,borderColor:palette.border}}>
+      <div className="flex items-center justify-between mb-3">
+        <h3 className={`font-bold text-base ${palette.head}`}>{emoji} {title}</h3>
+        <span className={`text-xs px-2.5 py-0.5 rounded-full font-medium ${palette.badge}`}>{dayCount}日間に適用</span>
+      </div>
+      {template.length===0?(
+        <p className="text-sm text-gray-400 text-center py-4">下のボタンでシフト枠を追加してください</p>
+      ):(
+        <div className="space-y-2 mb-3">
+          {template.map(item=>{
+            const t=types.find(t=>t.id===item.typeId); if(!t) return null;
+            return (
+              <div key={item.typeId} className="bg-white rounded-lg p-3 flex items-center justify-between shadow-sm">
+                <div className="flex items-center gap-2">
+                  <div className="w-3 h-3 rounded-full" style={{backgroundColor:t.color}}/><span className="text-sm font-semibold">{t.name}</span>
+                  <span className="text-xs text-gray-400">{t.start}〜{t.end}</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <button onClick={()=>updateReq(item.typeId,item.required-1)} className="w-7 h-7 bg-gray-100 rounded-full font-bold flex items-center justify-center hover:bg-gray-200">−</button>
+                  <span className="text-base font-bold w-7 text-center">{item.required}</span>
+                  <button onClick={()=>updateReq(item.typeId,item.required+1)} className="w-7 h-7 bg-gray-100 rounded-full font-bold flex items-center justify-center hover:bg-gray-200">＋</button>
+                  <span className="text-sm text-gray-500 ml-1">名</span>
+                  <button onClick={()=>removeFromTpl(item.typeId)} className="ml-2 text-red-400 hover:text-red-600 text-lg">✕</button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <div className="flex flex-wrap gap-2 mt-1">
+        {types.filter(t=>!template.find(i=>i.typeId===t.id)).map(t=>(
+          <button key={t.id} onClick={()=>addToTpl(t.id)}
+            className="text-xs px-3 py-1.5 rounded-full border-2 border-dashed font-medium hover:opacity-80"
+            style={{borderColor:t.color,color:t.color,backgroundColor:t.color+"15"}}>
+            ＋ {t.name}を追加
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── ③ RequestsTab ───────────────────────────────────────────
+// サイクル: 出勤 → 休み希望 → できれば休み → 有給 → 出勤
+const REQ_OPTS = [
+  { value: "",         label: "出勤",         bg: "bg-white",      text: "text-gray-300",   border: "border-gray-200"   },
+  { value: "off",      label: "休み希望",     bg: "bg-red-100",    text: "text-red-700",    border: "border-red-300"    },
+  { value: "prefer",   label: "できれば休み", bg: "bg-yellow-100", text: "text-yellow-700", border: "border-yellow-300" },
+  { value: "paid",     label: "有給",         bg: "bg-purple-100", text: "text-purple-700", border: "border-purple-300" },
+  { value: "required", label: "必出",         bg: "bg-green-100",  text: "text-green-700",  border: "border-green-300"  },
+];
+
+// 向こう半年の月リストを生成（YEAR/MONTHから6ヶ月）
+const SIX_MONTHS = Array.from({length:6},(_,i)=>{
+  const m=(MONTH-1+i)%12+1;
+  const y=YEAR+Math.floor((MONTH-1+i)/12);
+  return {year:y,month:m};
+});
+
+function RequestsTab({ staff, requests, setRequests, selStaffId, setSelStaffId }) {
+  const [reqYear,  setReqYear]  = useState(YEAR);
+  const [reqMonth, setReqMonth] = useState(MONTH);
+
+  const mKey       = `${reqYear}-${reqMonth}`;
+  const mDays      = new Date(reqYear, reqMonth, 0).getDate();
+  const mDates     = Array.from({length:mDays},(_,i)=>i+1);
+  const mFirstDow  = new Date(reqYear, reqMonth-1, 1).getDay();
+  const mHolidays  = getHolidaysForMonth(reqYear, reqMonth);
+  const mIsHoliday = d => mHolidays.has(d);
+  const mDow       = d => new Date(reqYear, reqMonth-1, d).getDay();
+  const mDayLabel  = d => ["日","月","火","水","木","金","土"][mDow(d)];
+
+  const mIdx = SIX_MONTHS.findIndex(m=>m.year===reqYear&&m.month===reqMonth);
+
+  function getReq(sid,day) { return requests[mKey]?.[sid]?.[day]||""; }
+  function cycleReq(sid,day) {
+    const vals=REQ_OPTS.map(o=>o.value);
+    const next=vals[(vals.indexOf(getReq(sid,day))+1)%vals.length];
+    setRequests(p=>({...p,[mKey]:{...(p[mKey]||{}),[sid]:{...(p[mKey]?.[sid]||{}),[day]:next}}}));
+  }
+
+  const sel         = staff.find(s=>s.id===selStaffId);
+  const offCnt      = mDates.filter(d=>getReq(selStaffId,d)==="off").length;
+  const preferCnt   = mDates.filter(d=>getReq(selStaffId,d)==="prefer").length;
+  const paidCnt     = mDates.filter(d=>getReq(selStaffId,d)==="paid").length;
+  const requiredCnt = mDates.filter(d=>getReq(selStaffId,d)==="required").length;
+
+  const cells=Array(mFirstDow).fill(null).concat(mDates);
+  const weeks=[]; for(let i=0;i<cells.length;i+=7) weeks.push(cells.slice(i,i+7));
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-lg font-bold text-gray-800">スタッフ別 休み希望・有給入力</h2>
+        {/* 月ナビゲーション */}
+        <div className="flex items-center gap-2">
+          <button onClick={()=>{ const prev=SIX_MONTHS[mIdx-1]; if(prev){setReqYear(prev.year);setReqMonth(prev.month);} }}
+            disabled={mIdx<=0} className="px-3 py-1.5 rounded border text-sm font-medium disabled:opacity-30 hover:bg-gray-100">◀</button>
+          <div className="text-center min-w-24">
+            <div className="font-bold text-gray-800">{reqYear}年{reqMonth}月</div>
+            {reqYear===YEAR&&reqMonth===MONTH&&<div className="text-xs text-blue-500 font-medium">自動生成対象月</div>}
+          </div>
+          <button onClick={()=>{ const next=SIX_MONTHS[mIdx+1]; if(next){setReqYear(next.year);setReqMonth(next.month);} }}
+            disabled={mIdx>=SIX_MONTHS.length-1} className="px-3 py-1.5 rounded border text-sm font-medium disabled:opacity-30 hover:bg-gray-100">▶</button>
+        </div>
+      </div>
+
+      {/* 月選択タブ */}
+      <div className="flex gap-1 mb-4 overflow-x-auto">
+        {SIX_MONTHS.map((m,i)=>{
+          const mk=`${m.year}-${m.month}`;
+          const hasSome=staff.some(s=>Object.keys(requests[mk]?.[s.id]||{}).length>0);
+          const isCur=m.year===reqYear&&m.month===reqMonth;
+          return (
+            <button key={i} onClick={()=>{setReqYear(m.year);setReqMonth(m.month);}}
+              className={`px-3 py-1.5 rounded-full text-sm font-medium whitespace-nowrap transition-all ${isCur?"bg-blue-600 text-white shadow":"bg-white border border-gray-200 text-gray-600 hover:border-blue-400"}`}>
+              {m.year !== YEAR ? `${m.year}/` : ""}{m.month}月
+              {hasSome&&<span className={`ml-1 text-xs ${isCur?"opacity-70":"text-blue-500"}`}>✓</span>}
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="flex gap-2 mb-5 flex-wrap">
+        {staff.map(s=>{
+          const ro = ROLE_OPTIONS.find(r=>r.value===(s.role||""));
+          const offC = mDates.filter(d=>getReq(s.id,d)==="off").length;
+          const reqC = mDates.filter(d=>getReq(s.id,d)==="required").length;
+          return (
+            <button key={s.id} onClick={()=>setSelStaffId(s.id)}
+              className={`px-4 py-2 rounded-full text-sm font-medium border transition-all ${selStaffId===s.id?"bg-blue-600 text-white border-blue-600 shadow":"bg-white text-gray-700 border-gray-300 hover:border-blue-400"}`}>
+              {s.role&&<span className="mr-1 text-xs font-bold" style={{color:selStaffId===s.id?"#fff":ro?.color}}>[{s.role}]</span>}
+              {s.name}
+              {offC>0&&<span className="ml-1.5 bg-red-500 text-white text-xs rounded-full px-1.5 py-0.5">{offC}</span>}
+              {reqC>0&&<span className="ml-1 bg-green-500 text-white text-xs rounded-full px-1.5 py-0.5">必{reqC}</span>}
+            </button>
+          );
+        })}
+      </div>
+
+      {sel && (
+        <div className="grid grid-cols-3 gap-6">
+          <div className="col-span-2">
+            <div className="bg-white rounded-lg shadow p-4">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-semibold text-gray-700">{sel.name} さんの希望入力
+                  <span className="ml-2 text-sm font-normal text-gray-400">（{reqYear}年{reqMonth}月）</span>
+                </h3>
+                <div className="flex items-center gap-2 text-xs flex-wrap">
+                  {REQ_OPTS.slice(1).map(o=>(
+                    <span key={o.value} className={`px-2 py-0.5 rounded-full border ${o.bg} ${o.text} ${o.border}`}>{o.label}</span>
+                  ))}<span className="text-gray-400">クリックで切替</span>
+                </div>
+              </div>
+              <div className="grid grid-cols-7 gap-1 mb-1">
+                {["日","月","火","水","木","金","土"].map((d,i)=>(
+                  <div key={d} className={`text-center text-xs font-bold py-1 ${i===0?"text-red-500":i===6?"text-blue-500":"text-gray-500"}`}>{d}</div>
+                ))}
+              </div>
+              {weeks.map((week,wi)=>(
+                <div key={wi} className="grid grid-cols-7 gap-1 mb-1">
+                  {week.map((day,di)=>{
+                    if(!day) return <div key={di}/>;
+                    const req=getReq(selStaffId,day);
+                    const opt=REQ_OPTS.find(o=>o.value===req)||REQ_OPTS[0];
+                    const dow=mDow(day);
+                    return (
+                      <button key={di} onClick={()=>cycleReq(selStaffId,day)}
+                        className={`rounded-lg p-2 text-center border transition-all hover:opacity-80 ${opt.bg} ${opt.border}`}>
+                        <div className={`text-sm font-bold ${dow===0?"text-red-500":dow===6?"text-blue-500":mIsHoliday(day)?"text-red-400":"text-gray-700"}`}>
+                          {day}{mIsHoliday(day)&&<span className="block text-red-400" style={{fontSize:"7px"}}>祝</span>}
+                        </div>
+                        <div className={`mt-0.5 leading-tight font-medium ${opt.text}`} style={{fontSize:"9px"}}>{opt.label}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            <div className="bg-white rounded-lg shadow p-4">
+              <h3 className="font-semibold text-gray-700 mb-3">入力サマリー</h3>
+              <div className="space-y-2 text-sm">
+                <div className="flex justify-between items-center">
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-400 inline-block"/>休み希望</span>
+                  <span className="font-bold text-red-600">{offCnt}日</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-yellow-400 inline-block"/>できれば休み</span>
+                  <span className="font-bold text-yellow-600">{preferCnt}日</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full inline-block" style={{backgroundColor:PAID_COLOR}}/>有給</span>
+                  <span className="font-bold" style={{color:PAID_COLOR}}>{paidCnt}日</span>
+                </div>
+                {requiredCnt>0&&(
+                  <div className="flex justify-between items-center">
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-500 inline-block"/>必出</span>
+                    <span className="font-bold text-green-700">{requiredCnt}日</span>
+                  </div>
+                )}
+                <div className="flex justify-between border-t pt-2 items-center">
+                  <span className="text-gray-600">出勤日（最大）</span>
+                  <span className="font-bold">{mDays - offCnt - paidCnt}日</span>
+                </div>
+              </div>
+            </div>
+            <div className="bg-white rounded-lg shadow p-4">
+              <h3 className="font-semibold text-gray-700 mb-3">勤務条件（参照）</h3>
+              <div className="space-y-2 text-sm text-gray-600">
+                {sel.role&&(()=>{const ro=ROLE_OPTIONS.find(r=>r.value===sel.role);return(
+                  <div className="flex justify-between items-center">
+                    <span>役職</span>
+                    <span className="font-bold text-white text-xs px-2 py-0.5 rounded-full" style={{backgroundColor:ro?.color}}>{sel.role}</span>
+                  </div>
+                );})()}
+                <div className="flex justify-between"><span>最大連勤</span><span className="font-bold text-red-600">{sel.maxConsecutive}日</span></div>
+                <div className="flex justify-between"><span>週の休日数（土〜金）</span><span className="font-bold">{sel.weeklyDaysOff}日</span></div>
+                <div className="flex justify-between"><span className="text-amber-700 font-medium">月の必須休日数</span><span className="font-bold text-amber-700">{sel.requiredDaysOff}日</span></div>
+                {(sel.minWorkDays||0)>0&&<div className="flex justify-between"><span className="text-emerald-700 font-medium">月の必須勤務日数</span><span className="font-bold text-emerald-700">{sel.minWorkDays}日</span></div>}
+                {sel.notes&&<div className="mt-2 p-2 bg-yellow-50 rounded text-xs text-yellow-700">📝 {sel.notes}</div>}
+              </div>
+            </div>
+            <div className="bg-white rounded-lg shadow p-4">
+              <h3 className="font-semibold text-gray-700 mb-3">🚨 希望が集中している日</h3>
+              {(()=>{
+                const crowded=mDates.filter(d=>staff.filter(s=>getReq(s.id,d)==="off").length>=2);
+                return crowded.length>0?(
+                  <div className="space-y-1.5">
+                    {crowded.map(d=>{
+                      const names=staff.filter(s=>getReq(s.id,d)==="off").map(s=>s.name.split(" ")[0]);
+                      return <div key={d} className="text-xs bg-red-50 border border-red-200 text-red-700 p-2 rounded">
+                        <span className="font-bold">{reqMonth}/{d}（{mDayLabel(d)}）</span><br/>{names.join("・")} が休み希望
+                      </div>;
+                    })}
+                  </div>
+                ):<p className="text-xs text-gray-400">希望の重複はありません ✓</p>;
+              })()}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+  </script>
+</body>
+</html>
