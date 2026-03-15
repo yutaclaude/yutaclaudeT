@@ -180,11 +180,8 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
     });
   });
 
-  // 日ごとに割り当て（土日祝を先に処理して人員を確保、次に平日 ── 月の休日数は絶対に破らない）
-  const sortedDates = [
-    ...DATES.filter(d => isWEH(d)),   // 土日祝を優先
-    ...DATES.filter(d => !isWEH(d)),  // 平日を後回し
-  ];
+  // 日ごとに割り当て（カレンダー順1→31 ── 連勤チェックが実際の前後関係と整合し月末の1/2不足を防ぐ）
+  const sortedDates = [...DATES];
   sortedDates.forEach(day => {
     const slots = [...(daySlots[day] || [])].sort((a, b) => {
       const sa = types.find(t => t.id === a.typeId)?.start || "";
