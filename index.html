@@ -193,6 +193,11 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
     });
 
     slots.forEach(({ typeId, required }) => {
+      // 既にこのtypeIdに割り当て済みの人数を確認し、本当に必要な追加人数のみ割り当てる
+      const alreadyOnType = staff.filter(s => sched[s.id][day] === typeId).length;
+      const stillNeeded   = required - alreadyOnType;
+      if (stillNeeded <= 0) return; // 既に充足しているならスキップ
+
       // 全制約を守った候補のみ収集（フォールバックなし）
       const pool = staff.filter(s => canAssign(s, day));
       // 優先順: 必出 > 役職カバー必要時は役職スタッフ優先 > できれば休み後回し > minWorkDays未達 > ペース調整 > typeCount均等化
@@ -231,20 +236,21 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
         // ⑥ typeCount均等化
         return (typeCount[a.id][typeId] || 0) - (typeCount[b.id][typeId] || 0);
       });
-      const toAssign = pool.slice(0, required);
+      const toAssign = pool.slice(0, stillNeeded); // stillNeededのみ追加割り当て
 
       toAssign.forEach(s => {
         sched[s.id][day] = typeId;
         typeCount[s.id][typeId]++;
       });
 
-      if (toAssign.length < required) {
+      const totalAssigned = alreadyOnType + toAssign.length;
+      if (totalAssigned < required) {
         const typeName = types.find(t => t.id === typeId)?.name || typeId;
-        const isCritical = toAssign.length < ASSIGN_LIMIT;
+        const isCritical = totalAssigned < ASSIGN_LIMIT;
         violations.push({
           day, typeId,
           severity: isCritical ? "critical" : "error",
-          message: `${MONTH}/${day}（${getDayLabel(day)}）${typeName}：${required}名必要 → ${toAssign.length}名（月の休日数優先のため）${isCritical ? " ⚠ 限界値未満！" : ""}`,
+          message: `${MONTH}/${day}（${getDayLabel(day)}）${typeName}：${required}名必要 → ${totalAssigned}名（月の休日数優先のため）${isCritical ? " ⚠ 限界値未満！" : ""}`,
         });
       }
     });
@@ -263,8 +269,14 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
       if (!canAssign(s, day)) return;                  // 制約違反ならスキップ
       const slots = daySlots[day] || [];
       if (slots.length === 0) return;                  // シフト枠なし
-      // typeCountが最も少ないシフト種別を選んで均等化を維持
-      const bestSlot = [...slots].sort((a, b) =>
+      // まだ必要人数に満たないスロットのみを対象にして過剰割り当てを防ぐ
+      const underfilled = slots.filter(sl => {
+        const assigned = staff.filter(x => sched[x.id][day] === sl.typeId).length;
+        return assigned < sl.required;
+      });
+      if (underfilled.length === 0) return; // 全スロットが充足済みなら追加割り当て不要
+      // typeCountが最も少ないシフト種別（未充足の中で）を選んで均等化を維持
+      const bestSlot = [...underfilled].sort((a, b) =>
         (typeCount[s.id][a.typeId]||0) - (typeCount[s.id][b.typeId]||0)
       )[0];
       sched[s.id][day] = bestSlot.typeId;
@@ -287,13 +299,19 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
       // 割り当て可能な役職スタッフを探す（typeCount均等化を維持）
       const available = keyRoleStaff.filter(s => canAssign(s, day));
       if (available.length === 0) return; // 後で事後チェックが拾う
+      // まだ必要人数に満たないスロットを優先（過剰割り当て防止）
+      const underfilledSlots = slots.filter(sl => {
+        const assigned = staff.filter(x => sched[x.id][day] === sl.typeId).length;
+        return assigned < sl.required;
+      });
+      const candidateSlots = underfilledSlots.length > 0 ? underfilledSlots : slots;
       available.sort((a, b) => {
-        const aMin = Math.min(...slots.map(sl => typeCount[a.id][sl.typeId]||0));
-        const bMin = Math.min(...slots.map(sl => typeCount[b.id][sl.typeId]||0));
+        const aMin = Math.min(...candidateSlots.map(sl => typeCount[a.id][sl.typeId]||0));
+        const bMin = Math.min(...candidateSlots.map(sl => typeCount[b.id][sl.typeId]||0));
         return aMin - bMin;
       });
       const s = available[0];
-      const bestSlot = [...slots].sort((a,b) =>
+      const bestSlot = [...candidateSlots].sort((a,b) =>
         (typeCount[s.id][a.typeId]||0) - (typeCount[s.id][b.typeId]||0)
       )[0];
       sched[s.id][day] = bestSlot.typeId;
