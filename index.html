@@ -195,7 +195,7 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
     slots.forEach(({ typeId, required }) => {
       // 全制約を守った候補のみ収集（フォールバックなし）
       const pool = staff.filter(s => canAssign(s, day));
-      // 優先順: 必出 > 役職カバー必要時は役職スタッフ優先 > できれば休み後回し > minWorkDays未達 > typeCount均等化
+      // 優先順: 必出 > 役職カバー必要時は役職スタッフ優先 > できれば休み後回し > minWorkDays未達 > ペース調整 > typeCount均等化
       const hasRoleCovered = staff.some(x => KEY_ROLES.has(x.role) && isWorking(sched[x.id][day]));
       pool.sort((a, b) => {
         // ① 必出は最優先
@@ -216,7 +216,20 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
         const aBelowMin = (a.minWorkDays||0) > 0 && getMonthWork(a.id) < a.minWorkDays ? 0 : 1;
         const bBelowMin = (b.minWorkDays||0) > 0 && getMonthWork(b.id) < b.minWorkDays ? 0 : 1;
         if (aBelowMin !== bBelowMin) return aBelowMin - bBelowMin;
-        // ⑤ typeCount均等化
+        // ⑤ ペース調整：月の進捗に対して出勤率が高いスタッフを後回しにして月末の人員不足を防ぐ
+        //   paceRate = 今月の出勤数 ÷ 出勤可能日数（= 月日数 − 必須休日 − 有給）
+        //   dayProgress = 処理中の日付 ÷ 月の日数（月のどの位置にいるか）
+        //   paceRate が dayProgress より大きい = 先走りすぎ → 後回し
+        const dayProgress = day / DAYS_IN_MONTH;
+        const paidA  = DATES.filter(d => sched[a.id][d] === "paid").length;
+        const paidB  = DATES.filter(d => sched[b.id][d] === "paid").length;
+        const maxWA  = Math.max(1, DAYS_IN_MONTH - (a.requiredDaysOff||0) - paidA);
+        const maxWB  = Math.max(1, DAYS_IN_MONTH - (b.requiredDaysOff||0) - paidB);
+        const aPace  = getMonthWork(a.id) / maxWA;
+        const bPace  = getMonthWork(b.id) / maxWB;
+        // ペース差が5%超のときだけ順位を変える（微差でのガタつき防止）
+        if (Math.abs(aPace - bPace) > 0.05) return aPace - bPace;
+        // ⑥ typeCount均等化
         return (typeCount[a.id][typeId] || 0) - (typeCount[b.id][typeId] || 0);
       });
       const toAssign = pool.slice(0, required);
@@ -594,7 +607,7 @@ function AutoGenTab({ staff, types, daySlots, requests,
     if (val === "paid") return { label: "有", fg: PAID_COLOR,  bg: "#ede9fe" };
     if (val === "off")  return { label: "希望", fg: "#ef4444",   bg: "#fee2e2" };
     if (type)           return { label: type.name.slice(0,1), fg: type.color, bg: type.color+"25" };
-    if ((daySlots[day]||[]).length > 0) return { label: "休", fg: "#d1d5db", bg: "#fafafa" };
+    if ((daySlots[day]||[]).length > 0) return { label: "休", fg: "#ef4444", bg: "#fff1f2" };
     return { label: "—", fg: "#e5e7eb", bg: "#fff" };
   }
 
