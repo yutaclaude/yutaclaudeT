@@ -253,42 +253,45 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
     });
   });
 
-  // ─ 必須勤務日数の補完パス ─────────────────────────────────
-  // メインループ後にminWorkDays未達のスタッフへ追加割り当てを試みる
-  // 土日祝優先・typeCount均等化維持・全制約厳守
-  const fillDates = [
-    ...DATES.filter(d => isWEH(d)),
-    ...DATES.filter(d => !isWEH(d)),
-  ];
-  staff.filter(s => (s.minWorkDays||0) > 0).forEach(s => {
-    fillDates.forEach(day => {
-      if (getMonthWork(s.id) >= s.minWorkDays) return; // 達成済みならスキップ
-      if (!canAssign(s, day)) return;                  // 制約違反ならスキップ
+  // ─ 必須休日数を正確に守る補完パス ──────────────────────────
+  // 目標：各スタッフの出勤日数 = DAYS_IN_MONTH − requiredDaysOff − 有給日数
+  //   それ以上もそれ以下も許さない（canAssignが上限を守り、このパスが下限を保証）
+  staff.forEach(s => {
+    const paidCount = DATES.filter(d => sched[s.id][d] === "paid").length;
+    const maxWork   = Math.max(0, DAYS_IN_MONTH - (s.requiredDaysOff || 0) - paidCount);
+    DATES.forEach(day => {
+      if (getMonthWork(s.id) >= maxWork) return; // 目標達成済みならスキップ
+      if (!canAssign(s, day)) return;            // 連勤・週休・月上限制約に引っかかるならスキップ
       const slots = daySlots[day] || [];
-      if (slots.length === 0) return;                  // シフト枠なし
-      // まだ必要人数に満たないスロットのみを対象にして過剰割り当てを防ぐ
+      if (slots.length === 0) return;
+      // 未充足スロットを優先（スロット必要人数も同時に満たす）
+      // 充足済みスロットしかない場合でも、必須休日数を守るため割り当て続ける
       const underfilled = slots.filter(sl => {
         const assigned = staff.filter(x => sched[x.id][day] === sl.typeId).length;
         return assigned < sl.required;
       });
-      if (underfilled.length === 0) return; // 全スロットが充足済みなら追加割り当て不要
-      // typeCountが最も少ないシフト種別（未充足の中で）を選んで均等化を維持
-      const bestSlot = [...underfilled].sort((a, b) =>
+      const candidateSlots = underfilled.length > 0 ? underfilled : slots;
+      const bestSlot = [...candidateSlots].sort((a, b) =>
         (typeCount[s.id][a.typeId]||0) - (typeCount[s.id][b.typeId]||0)
       )[0];
       sched[s.id][day] = bestSlot.typeId;
       typeCount[s.id][bestSlot.typeId]++;
     });
+    // 目標未達の場合は違反として記録（連勤・週休制約で物理的に割り当て不可能だった場合）
+    const achieved = getMonthWork(s.id);
+    if (achieved < maxWork) {
+      violations.push({
+        day: null, staffId: s.id, severity: "warning",
+        message: `${s.name}：出勤 ${achieved}日（目標 ${maxWork}日）── 連勤・週休制約により ${maxWork - achieved}日分を割り当てられませんでした`,
+      });
+    }
   });
 
   // ─ 役職カバー確保パス ─────────────────────────────────────
   // 毎日最低1名の店長/副店長/チーフが出勤するよう追加割り当て
   const keyRoleStaff = staff.filter(s => KEY_ROLES.has(s.role));
   if (keyRoleStaff.length > 0) {
-    const roleFillDates = [
-      ...DATES.filter(d => isWEH(d)),
-      ...DATES.filter(d => !isWEH(d)),
-    ];
+    const roleFillDates = [...DATES];
     roleFillDates.forEach(day => {
       if (keyRoleStaff.some(s => isWorking(sched[s.id][day]))) return; // 既にカバー済み
       const slots = daySlots[day] || [];
