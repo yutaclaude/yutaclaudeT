@@ -41,12 +41,12 @@ function saveLS(key, value) {
 }
 
 
-// ─── 定数 ────────────────────────────────────────────────────
-const YEAR = 2026, MONTH = 3;
-const NEXT_MONTH = 4, NEXT_YEAR = 2026;
-const DAYS_IN_MONTH = new Date(YEAR, MONTH, 0).getDate();
-const DATES = Array.from({ length: DAYS_IN_MONTH }, (_, i) => i + 1);
-const HOLIDAYS = new Set([20]); // 春分の日（自動生成・シフト枠設定用、運用月固定）
+// ─── 定数（月変更に対応するため let で宣言） ──────────────────
+let YEAR = 2026, MONTH = 3;
+let NEXT_MONTH = 4, NEXT_YEAR = 2026;
+let DAYS_IN_MONTH = new Date(YEAR, MONTH, 0).getDate();
+let DATES = Array.from({ length: DAYS_IN_MONTH }, (_, i) => i + 1);
+let HOLIDAYS = new Set([20]); // 初期値：春分の日
 
 // 向こう半年分の希望入力用・月別祝日マップ（2026年）
 const HOLIDAYS_2026 = {
@@ -62,6 +62,19 @@ function getHolidaysForMonth(year, month) {
   return new Set();
 }
 
+// 対象月をまとめて更新（グローバル変数を書き換え → React再レンダー後に新値が反映される）
+function updateCurrentMonth(year, month) {
+  YEAR          = year;
+  MONTH         = month;
+  NEXT_MONTH    = month % 12 + 1;
+  NEXT_YEAR     = month === 12 ? year + 1 : year;
+  DAYS_IN_MONTH = new Date(year, month, 0).getDate();
+  DATES         = Array.from({ length: DAYS_IN_MONTH }, (_, i) => i + 1);
+  HOLIDAYS      = getHolidaysForMonth(year, month);
+  WD_COUNT      = DATES.filter(d => !isWEH(d)).length;
+  WEH_COUNT     = DATES.filter(d =>  isWEH(d)).length;
+}
+
 function getDow(day)      { return new Date(YEAR, MONTH - 1, day).getDay(); }
 function getDayLabel(day) { return ["日","月","火","水","木","金","土"][getDow(day)]; }
 function isWeekend(day)   { const d = getDow(day); return d === 0 || d === 6; }
@@ -74,8 +87,8 @@ function getWeekSatStart(day) {
   return day - (dow === 6 ? 0 : dow + 1);
 }
 
-const WD_COUNT  = DATES.filter(d => !isWEH(d)).length;
-const WEH_COUNT = DATES.filter(d =>  isWEH(d)).length;
+let WD_COUNT  = DATES.filter(d => !isWEH(d)).length;
+let WEH_COUNT = DATES.filter(d =>  isWEH(d)).length;
 
 // ─── 初期データ ───────────────────────────────────────────────
 // role: ""=一般 / "店長" / "副店長" / "チーフ" — 役職スタッフは毎日最低1名の出勤を保証
@@ -612,6 +625,17 @@ function App() {
     const s = loadLS("as_staff", INIT_STAFF);
     return Object.fromEntries(s.map(st => [st.id, 0]));
   });
+  const [schedYear,    setSchedYear]    = useState(YEAR);
+  const [schedMonth,   setSchedMonth]   = useState(MONTH);
+
+  function handleMonthChange(year, month) {
+    updateCurrentMonth(year, month);
+    setSched(null);
+    setViolations([]);
+    setTypeCount({});
+    setSchedYear(year);
+    setSchedMonth(month);
+  }
 
   // 変更のたびに自動保存
   useEffect(() => saveLS("as_staff",    staff),    [staff]);
@@ -640,7 +664,7 @@ function App() {
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-xl font-bold">🗓 オートシフト — プロトタイプ</h1>
-            <p className="text-blue-200 text-sm">2026年3月 シフト管理</p>
+            <p className="text-blue-200 text-sm">{schedYear}年{schedMonth}月 シフト管理</p>
           </div>
           <div className="flex items-center gap-3">
             <span className="text-blue-200 text-xs flex items-center gap-1">
@@ -671,13 +695,14 @@ function App() {
 
       <main className="p-6 max-w-6xl mx-auto no-print">
         {tab === "staff"    && <StaffTab    staff={staff} setStaff={setStaff} />}
-        {tab === "slots"    && <SlotsTab    types={types} daySlots={daySlots} setDaySlots={setDaySlots} staff={staff} requests={requests[`${YEAR}-${MONTH}`]||{}} />}
+        {tab === "slots"    && <SlotsTab    types={types} daySlots={daySlots} setDaySlots={setDaySlots} staff={staff} requests={requests[`${schedYear}-${schedMonth}`]||{}} />}
         {tab === "requests" && <RequestsTab staff={staff} requests={requests} setRequests={setRequests} selStaffId={selStaffId} setSelStaffId={setSelStaffId} />}
-        {tab === "auto"     && <AutoGenTab  staff={staff} types={types} setTypes={setTypes} daySlots={daySlots} requests={requests[`${YEAR}-${MONTH}`]||{}}
+        {tab === "auto"     && <AutoGenTab  staff={staff} types={types} setTypes={setTypes} daySlots={daySlots} requests={requests[`${schedYear}-${schedMonth}`]||{}}
                                sched={sched} setSched={setSched}
                                violations={violations} setViolations={setViolations}
                                typeCount={typeCount} setTypeCount={setTypeCount}
-                               prevWeekWork={prevWeekWork} setPrevWeekWork={setPrevWeekWork} />}
+                               prevWeekWork={prevWeekWork} setPrevWeekWork={setPrevWeekWork}
+                               schedYear={schedYear} schedMonth={schedMonth} onMonthChange={handleMonthChange} />}
       </main>
     </div>
   );
@@ -687,7 +712,8 @@ function App() {
 function AutoGenTab({ staff, types, setTypes, daySlots, requests,
                       sched, setSched, violations, setViolations,
                       typeCount, setTypeCount,
-                      prevWeekWork, setPrevWeekWork }) {
+                      prevWeekWork, setPrevWeekWork,
+                      schedYear, schedMonth, onMonthChange }) {
   const [editCell,      setEditCell]     = useState(null);
   const [showPrevInput, setShowPrevInput] = useState(false);
   const [pdfLoading,    setPdfLoading]   = useState(false);
@@ -769,6 +795,29 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
 
   return (
     <div>
+      {/* ─ 対象月選択 ─ */}
+      <div className="mb-4 flex flex-wrap items-center gap-3 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3">
+        <span className="text-sm font-semibold text-blue-700">📅 対象月：</span>
+        <select
+          value={schedYear}
+          onChange={e => onMonthChange(Number(e.target.value), schedMonth)}
+          className="border border-gray-300 rounded px-2 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-400">
+          {[2025,2026,2027,2028].map(y => <option key={y} value={y}>{y}年</option>)}
+        </select>
+        <select
+          value={schedMonth}
+          onChange={e => onMonthChange(schedYear, Number(e.target.value))}
+          className="border border-gray-300 rounded px-2 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-400">
+          {[1,2,3,4,5,6,7,8,9,10,11,12].map(m => <option key={m} value={m}>{m}月</option>)}
+        </select>
+        <span className="text-sm font-bold text-gray-700">{schedYear}年{schedMonth}月</span>
+        {sched && (
+          <span className="ml-auto text-xs text-amber-600 flex items-center gap-1">
+            ⚠ 月を変更すると現在のシフトはリセットされます
+          </span>
+        )}
+      </div>
+
       {/* ─ コントロール ─ */}
       <div className="flex items-start justify-between mb-5">
         <div>
@@ -1172,7 +1221,7 @@ function PrintArea({ sched, staff, types, daySlots, violations }) {
         marginBottom:"4px",borderBottom:"2px solid #1d4ed8",paddingBottom:"3px"}}>
         <div>
           <div style={{fontSize:"15px",fontWeight:"bold",color:"#1d4ed8"}}>
-            2026年3月　シフト表
+            {YEAR}年{MONTH}月　シフト表
           </div>
           <div style={{fontSize:"8px",color:"#555",marginTop:"1px",display:"flex",gap:"10px"}}>
             {types.map(t=>(
@@ -1712,16 +1761,19 @@ const REQ_OPTS = [
 ];
 
 // 向こう半年の月リストを生成（YEAR/MONTHから6ヶ月）
-const SIX_MONTHS = Array.from({length:6},(_,i)=>{
-  const m=(MONTH-1+i)%12+1;
-  const y=YEAR+Math.floor((MONTH-1+i)/12);
-  return {year:y,month:m};
-});
+function getSixMonths() {
+  return Array.from({length:6},(_,i)=>{
+    const m=(MONTH-1+i)%12+1;
+    const y=YEAR+Math.floor((MONTH-1+i)/12);
+    return {year:y,month:m};
+  });
+}
 
 function RequestsTab({ staff, requests, setRequests, selStaffId, setSelStaffId }) {
   const [reqYear,  setReqYear]  = useState(YEAR);
   const [reqMonth, setReqMonth] = useState(MONTH);
 
+  const sixMonths  = getSixMonths();
   const mKey       = `${reqYear}-${reqMonth}`;
   const mDays      = new Date(reqYear, reqMonth, 0).getDate();
   const mDates     = Array.from({length:mDays},(_,i)=>i+1);
@@ -1731,7 +1783,7 @@ function RequestsTab({ staff, requests, setRequests, selStaffId, setSelStaffId }
   const mDow       = d => new Date(reqYear, reqMonth-1, d).getDay();
   const mDayLabel  = d => ["日","月","火","水","木","金","土"][mDow(d)];
 
-  const mIdx = SIX_MONTHS.findIndex(m=>m.year===reqYear&&m.month===reqMonth);
+  const mIdx = sixMonths.findIndex(m=>m.year===reqYear&&m.month===reqMonth);
 
   function getReq(sid,day) { return requests[mKey]?.[sid]?.[day]||""; }
   function cycleReq(sid,day) {
@@ -1755,20 +1807,20 @@ function RequestsTab({ staff, requests, setRequests, selStaffId, setSelStaffId }
         <h2 className="text-lg font-bold text-gray-800">スタッフ別 休み希望・有給入力</h2>
         {/* 月ナビゲーション */}
         <div className="flex items-center gap-2">
-          <button onClick={()=>{ const prev=SIX_MONTHS[mIdx-1]; if(prev){setReqYear(prev.year);setReqMonth(prev.month);} }}
+          <button onClick={()=>{ const prev=sixMonths[mIdx-1]; if(prev){setReqYear(prev.year);setReqMonth(prev.month);} }}
             disabled={mIdx<=0} className="px-3 py-1.5 rounded border text-sm font-medium disabled:opacity-30 hover:bg-gray-100">◀</button>
           <div className="text-center min-w-24">
             <div className="font-bold text-gray-800">{reqYear}年{reqMonth}月</div>
             {reqYear===YEAR&&reqMonth===MONTH&&<div className="text-xs text-blue-500 font-medium">自動生成対象月</div>}
           </div>
-          <button onClick={()=>{ const next=SIX_MONTHS[mIdx+1]; if(next){setReqYear(next.year);setReqMonth(next.month);} }}
-            disabled={mIdx>=SIX_MONTHS.length-1} className="px-3 py-1.5 rounded border text-sm font-medium disabled:opacity-30 hover:bg-gray-100">▶</button>
+          <button onClick={()=>{ const next=sixMonths[mIdx+1]; if(next){setReqYear(next.year);setReqMonth(next.month);} }}
+            disabled={mIdx>=sixMonths.length-1} className="px-3 py-1.5 rounded border text-sm font-medium disabled:opacity-30 hover:bg-gray-100">▶</button>
         </div>
       </div>
 
       {/* 月選択タブ */}
       <div className="flex gap-1 mb-4 overflow-x-auto">
-        {SIX_MONTHS.map((m,i)=>{
+        {sixMonths.map((m,i)=>{
           const mk=`${m.year}-${m.month}`;
           const hasSome=staff.some(s=>Object.keys(requests[mk]?.[s.id]||{}).length>0);
           const isCur=m.year===reqYear&&m.month===reqMonth;
