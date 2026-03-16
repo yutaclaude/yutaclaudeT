@@ -11,6 +11,8 @@
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <!-- Babel (JSX transform) -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- html2pdf.js (PDF出力) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
   <style>
     @media print {
       @page { size: A4 landscape; margin: 7mm; }
@@ -688,6 +690,7 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
                       prevWeekWork, setPrevWeekWork }) {
   const [editCell,      setEditCell]     = useState(null);
   const [showPrevInput, setShowPrevInput] = useState(false);
+  const [pdfLoading,    setPdfLoading]   = useState(false);
   // ─ シフト種別管理 state ─
   const [editTypeId,  setEditTypeId]  = useState(null);
   const [typeForm,    setTypeForm]    = useState({});
@@ -700,6 +703,31 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
     if (!newType.name) return;
     setTypes(p=>[...p,{...newType,id:`T${Date.now()}`}]);
     setNewType({name:"",start:"09:00",end:"17:00",color:"#6366f1"}); setShowAddType(false);
+  }
+
+  function exportPDF() {
+    const el = document.getElementById("pdf-print-area");
+    if (!el) return;
+    setPdfLoading(true);
+    el.style.display = "block";
+    html2pdf()
+      .set({
+        margin: [7, 7, 7, 7],
+        filename: `${YEAR}年${MONTH}月_シフト表.pdf`,
+        image: { type: "jpeg", quality: 0.98 },
+        html2canvas: { scale: 2, useCORS: true, logging: false },
+        jsPDF: { unit: "mm", format: "a4", orientation: "landscape" },
+      })
+      .from(el)
+      .save()
+      .then(() => {
+        el.style.display = "none";
+        setPdfLoading(false);
+      })
+      .catch(() => {
+        el.style.display = "none";
+        setPdfLoading(false);
+      });
   }
 
   function handleGenerate() {
@@ -759,9 +787,9 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
             ⚡ シフトを自動生成
           </button>
           {sched && (
-            <button onClick={() => window.print()}
-              className="bg-gray-700 text-white px-5 py-2.5 rounded-lg font-semibold hover:bg-gray-800 shadow">
-              🖨️ A4横で印刷・PDF保存
+            <button onClick={exportPDF} disabled={pdfLoading}
+              className={`px-5 py-2.5 rounded-lg font-semibold shadow text-white ${pdfLoading ? "bg-gray-400 cursor-wait" : "bg-red-600 hover:bg-red-700"}`}>
+              {pdfLoading ? "⏳ 生成中…" : "📄 PDFで保存"}
             </button>
           )}
         </div>
@@ -1138,7 +1166,7 @@ function PrintArea({ sched, staff, types, daySlots, violations }) {
   }
 
   return (
-    <div className="print-only" style={{fontFamily:"sans-serif",color:"#111"}}>
+    <div id="pdf-print-area" className="print-only" style={{fontFamily:"sans-serif",color:"#111"}}>
       {/* ヘッダー */}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",
         marginBottom:"4px",borderBottom:"2px solid #1d4ed8",paddingBottom:"3px"}}>
