@@ -324,12 +324,13 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
       });
     }
 
-    // 目標未達の場合は違反として記録（連勤・週休制約で物理的に割り当て不可能だった場合）
+    // 目標未達の場合は違反として記録（スロット上限・連勤・週休制約で物理的に割り当て不可能だった場合）
     const achieved = getMonthWork(s.id);
     if (achieved < maxWork) {
+      const actualRest = DAYS_IN_MONTH - achieved - paidCount;
       violations.push({
         day: null, staffId: s.id, severity: "warning",
-        message: `${s.name}：出勤 ${achieved}日（目標 ${maxWork}日）── 連勤・週休制約により ${maxWork - achieved}日分を割り当てられませんでした`,
+        message: `${s.name}：出勤 ${achieved}日（目標 ${maxWork}日）／休日 ${actualRest}日（設定 ${s.requiredDaysOff || 0}日）── スロット上限・連勤・週休制約により ${maxWork - achieved}日分を割り当てられませんでした`,
       });
     }
   });
@@ -346,12 +347,13 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
       // 割り当て可能な役職スタッフを探す（typeCount均等化を維持）
       const available = keyRoleStaff.filter(s => canAssign(s, day));
       if (available.length === 0) return; // 後で事後チェックが拾う
-      // まだ必要人数に満たないスロットを優先（過剰割り当て防止）
+      // 未充足スロットのみ対象（スロット上限厳守）
       const underfilledSlots = slots.filter(sl => {
         const assigned = staff.filter(x => sched[x.id][day] === sl.typeId).length;
         return assigned < sl.required;
       });
-      const candidateSlots = underfilledSlots.length > 0 ? underfilledSlots : slots;
+      if (underfilledSlots.length === 0) return; // 全スロット満員 → 役職カバー割り当て不可（事後チェックが警告）
+      const candidateSlots = underfilledSlots;
       available.sort((a, b) => {
         const aMin = Math.min(...candidateSlots.map(sl => typeCount[a.id][sl.typeId]||0));
         const bMin = Math.min(...candidateSlots.map(sl => typeCount[b.id][sl.typeId]||0));
@@ -397,7 +399,17 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
           message: `${s.name}：${MONTH}/${day}（${getDayLabel(day)}）必出ですが連勤・週休制約により割り当て不可` });
         return;
       }
-      const bestSlot = [...slots].sort((a,b) =>
+      // 未充足スロット優先、全満員でも必出なので割り当て（スロット超過警告あり）
+      const underfilledReq = slots.filter(sl => {
+        const assigned = staff.filter(x => sched[x.id][day] === sl.typeId).length;
+        return assigned < sl.required;
+      });
+      const reqCandidates = underfilledReq.length > 0 ? underfilledReq : slots;
+      if (underfilledReq.length === 0) {
+        violations.push({ day, staffId: s.id, severity: "warning",
+          message: `${s.name}：${MONTH}/${day} 必出のためスロット上限を超過して割り当てました` });
+      }
+      const bestSlot = [...reqCandidates].sort((a,b) =>
         (typeCount[s.id][a.typeId]||0) - (typeCount[s.id][b.typeId]||0)
       )[0];
       sched[s.id][day] = bestSlot.typeId;
