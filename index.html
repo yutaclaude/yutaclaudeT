@@ -924,11 +924,15 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
                     {DATES.map(day => {
                       const dow = getDow(day);
                       const isH = isHoliday(day);
-                      // 余力：スロット必要人数の合計 − 実割り当て数（空き枠が残っている日を表示）
+                      // 余力／超過：スロット必要人数と実割り当て数の差
                       const slots = daySlots[day] || [];
                       const slack = slots.reduce((sum, sl) => {
                         const assigned = staff.filter(s => (sched?.[s.id]?.[day]) === sl.typeId).length;
                         return sum + Math.max(0, sl.required - assigned);
+                      }, 0);
+                      const excess = slots.reduce((sum, sl) => {
+                        const assigned = staff.filter(s => (sched?.[s.id]?.[day]) === sl.typeId).length;
+                        return sum + Math.max(0, assigned - sl.required);
                       }, 0);
                       return (
                         <th key={day} className={`border border-gray-200 py-1 text-center font-semibold`}
@@ -938,9 +942,8 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
                           }}>
                           <div>{day}</div>
                           <div style={{fontSize:"9px"}}>{isH?"祝":getDayLabel(day)}</div>
-                          {slack > 0 && (
-                            <div style={{fontSize:"8px", color:"#d97706", fontWeight:"bold", lineHeight:1.1}}>▲{slack}</div>
-                          )}
+                          {slack  > 0 && <div style={{fontSize:"8px", color:"#d97706", fontWeight:"bold", lineHeight:1.1}}>▲{slack}</div>}
+                          {excess > 0 && <div style={{fontSize:"8px", color:"#dc2626", fontWeight:"bold", lineHeight:1.1}}>▼{excess}</div>}
                         </th>
                       );
                     })}
@@ -1024,12 +1027,15 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
                         const slot     = (daySlots[day]||[]).find(s=>s.typeId===t.id);
                         const required = slot?.required || 0;
                         const assigned = staff.filter(s => sched[s.id]?.[day] === t.id).length;
-                        const ok       = required===0 || assigned>=required;
+                        const under = required > 0 && assigned <  required;
+                        const over  = required > 0 && assigned >  required;
+                        const exact = required > 0 && assigned === required;
                         return (
                           <td key={day} className="border border-gray-200 text-center py-1"
                             style={{fontSize:"9px",
-                              background: !ok ? "#fee2e2" : required>0 ? "#f0fdf4" : "",
-                              color: ok ? "#16a34a" : "#dc2626", fontWeight: ok?"normal":"bold"}}>
+                              background: under ? "#fee2e2" : over ? "#fff7ed" : exact ? "#f0fdf4" : "",
+                              color:      under ? "#dc2626" : over ? "#d97706" : "#16a34a",
+                              fontWeight: (under || over) ? "bold" : "normal"}}>
                             {required > 0 ? `${assigned}/${required}` : <span style={{color:"#d1d5db"}}>—</span>}
                           </td>
                         );
