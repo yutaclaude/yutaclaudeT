@@ -625,8 +625,9 @@ function App() {
     const s = loadLS("as_staff", INIT_STAFF);
     return Object.fromEntries(s.map(st => [st.id, 0]));
   });
-  const [schedYear,    setSchedYear]    = useState(YEAR);
-  const [schedMonth,   setSchedMonth]   = useState(MONTH);
+  const [schedYear,       setSchedYear]       = useState(YEAR);
+  const [schedMonth,      setSchedMonth]      = useState(MONTH);
+  const [savedSchedules,  setSavedSchedules]  = useState(() => loadLS("as_saved_schedules", []));
 
   function handleMonthChange(year, month) {
     updateCurrentMonth(year, month);
@@ -637,11 +638,46 @@ function App() {
     setSchedMonth(month);
   }
 
+  function handleSaveSchedule(name) {
+    const entry = {
+      id: Date.now(),
+      name: name.trim() || `${schedYear}年${schedMonth}月`,
+      year: schedYear,
+      month: schedMonth,
+      sched,
+      violations,
+      typeCount,
+      savedAt: new Date().toLocaleString("ja-JP", {
+        year: "numeric", month: "2-digit", day: "2-digit",
+        hour: "2-digit", minute: "2-digit"
+      }),
+    };
+    setSavedSchedules(prev => [entry, ...prev]);
+  }
+
+  function handleLoadSchedule(id) {
+    const entry = savedSchedules.find(s => s.id === id);
+    if (!entry) return;
+    updateCurrentMonth(entry.year, entry.month);
+    setSchedYear(entry.year);
+    setSchedMonth(entry.month);
+    setSched(entry.sched);
+    setViolations(entry.violations);
+    setTypeCount(entry.typeCount);
+    setTab("auto");
+  }
+
+  function handleDeleteSchedule(id) {
+    if (!window.confirm("このシフトを削除しますか？")) return;
+    setSavedSchedules(prev => prev.filter(s => s.id !== id));
+  }
+
   // 変更のたびに自動保存
-  useEffect(() => saveLS("as_staff",    staff),    [staff]);
-  useEffect(() => saveLS("as_types",    types),    [types]);
-  useEffect(() => saveLS("as_daySlots", daySlots), [daySlots]);
-  useEffect(() => saveLS("as_requests", requests), [requests]);
+  useEffect(() => saveLS("as_staff",           staff),          [staff]);
+  useEffect(() => saveLS("as_types",           types),          [types]);
+  useEffect(() => saveLS("as_daySlots",        daySlots),       [daySlots]);
+  useEffect(() => saveLS("as_requests",        requests),       [requests]);
+  useEffect(() => saveLS("as_saved_schedules", savedSchedules), [savedSchedules]);
 
   function handleReset() {
     if (!window.confirm("すべてのデータをリセットしますか？この操作は元に戻せません。")) return;
@@ -702,7 +738,11 @@ function App() {
                                violations={violations} setViolations={setViolations}
                                typeCount={typeCount} setTypeCount={setTypeCount}
                                prevWeekWork={prevWeekWork} setPrevWeekWork={setPrevWeekWork}
-                               schedYear={schedYear} schedMonth={schedMonth} onMonthChange={handleMonthChange} />}
+                               schedYear={schedYear} schedMonth={schedMonth} onMonthChange={handleMonthChange}
+                               savedSchedules={savedSchedules}
+                               onSaveSchedule={handleSaveSchedule}
+                               onLoadSchedule={handleLoadSchedule}
+                               onDeleteSchedule={handleDeleteSchedule} />}
       </main>
     </div>
   );
@@ -713,10 +753,14 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
                       sched, setSched, violations, setViolations,
                       typeCount, setTypeCount,
                       prevWeekWork, setPrevWeekWork,
-                      schedYear, schedMonth, onMonthChange }) {
+                      schedYear, schedMonth, onMonthChange,
+                      savedSchedules, onSaveSchedule, onLoadSchedule, onDeleteSchedule }) {
   const [editCell,      setEditCell]     = useState(null);
   const [showPrevInput, setShowPrevInput] = useState(false);
   const [pdfLoading,    setPdfLoading]   = useState(false);
+  const [showSaveForm,  setShowSaveForm] = useState(false);
+  const [saveName,      setSaveName]     = useState("");
+  const [showSavedList, setShowSavedList] = useState(false);
   // ─ シフト種別管理 state ─
   const [editTypeId,  setEditTypeId]  = useState(null);
   const [typeForm,    setTypeForm]    = useState({});
@@ -841,8 +885,84 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
               {pdfLoading ? "⏳ 生成中…" : "📄 PDFで保存"}
             </button>
           )}
+          {sched && (
+            <button onClick={() => { setSaveName(`${schedYear}年${schedMonth}月`); setShowSaveForm(v=>!v); setShowSavedList(false); }}
+              className="bg-indigo-600 text-white px-5 py-2.5 rounded-lg font-semibold hover:bg-indigo-700 shadow">
+              💾 保存
+            </button>
+          )}
+          <button onClick={() => { setShowSavedList(v=>!v); setShowSaveForm(false); }}
+            className={`relative px-5 py-2.5 rounded-lg font-semibold shadow border ${showSavedList ? "bg-indigo-50 border-indigo-400 text-indigo-700" : "bg-white border-gray-300 text-gray-600 hover:bg-gray-50"}`}>
+            📂 呼び出し
+            {savedSchedules.length > 0 && (
+              <span className="absolute -top-1.5 -right-1.5 bg-indigo-600 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center font-bold">
+                {savedSchedules.length}
+              </span>
+            )}
+          </button>
         </div>
       </div>
+
+      {/* ─ 保存フォーム ─ */}
+      {showSaveForm && (
+        <div className="mb-4 bg-indigo-50 border border-indigo-200 rounded-xl p-4 flex flex-wrap items-center gap-3">
+          <span className="text-sm font-semibold text-indigo-700">💾 シフト名：</span>
+          <input
+            type="text"
+            value={saveName}
+            onChange={e => setSaveName(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") { onSaveSchedule(saveName); setShowSaveForm(false); } }}
+            placeholder={`${schedYear}年${schedMonth}月`}
+            className="border border-gray-300 rounded px-3 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-400 min-w-48"
+          />
+          <button
+            onClick={() => { onSaveSchedule(saveName); setShowSaveForm(false); }}
+            className="bg-indigo-600 text-white px-4 py-1.5 rounded-lg text-sm font-semibold hover:bg-indigo-700">
+            保存する
+          </button>
+          <button onClick={() => setShowSaveForm(false)}
+            className="text-gray-400 hover:text-gray-600 text-sm px-2">キャンセル</button>
+        </div>
+      )}
+
+      {/* ─ 保存済み一覧 ─ */}
+      {showSavedList && (
+        <div className="mb-4 bg-white border border-indigo-200 rounded-xl p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="font-semibold text-indigo-700">📂 保存済みシフト一覧</h3>
+            <button onClick={() => setShowSavedList(false)} className="text-gray-400 hover:text-gray-600 text-lg leading-none">✕</button>
+          </div>
+          {savedSchedules.length === 0 ? (
+            <p className="text-sm text-gray-400 text-center py-4">保存済みのシフトはありません</p>
+          ) : (
+            <div className="space-y-2 max-h-72 overflow-y-auto">
+              {savedSchedules.map(entry => (
+                <div key={entry.id}
+                  className="flex items-center gap-3 p-3 rounded-lg border border-gray-100 bg-gray-50 hover:bg-indigo-50 hover:border-indigo-200 transition-colors">
+                  <div className="flex-shrink-0 bg-indigo-100 text-indigo-700 text-xs font-bold rounded-lg px-2 py-1 text-center leading-tight min-w-12">
+                    {entry.year}年<br/>{entry.month}月
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="font-semibold text-gray-800 text-sm truncate">{entry.name}</div>
+                    <div className="text-xs text-gray-400 mt-0.5">保存日時：{entry.savedAt}</div>
+                  </div>
+                  <button
+                    onClick={() => { onLoadSchedule(entry.id); setShowSavedList(false); }}
+                    className="flex-shrink-0 bg-emerald-600 text-white text-xs font-semibold px-3 py-1.5 rounded-lg hover:bg-emerald-700">
+                    読み込む
+                  </button>
+                  <button
+                    onClick={() => onDeleteSchedule(entry.id)}
+                    className="flex-shrink-0 text-gray-300 hover:text-red-500 text-lg px-1 transition-colors"
+                    title="削除">
+                    🗑
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ─ シフト種別管理 ─ */}
       <div className="mb-5 bg-white border border-gray-200 rounded-xl p-4">
