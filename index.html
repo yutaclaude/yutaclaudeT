@@ -294,18 +294,26 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
       typeCount[s.id][bestSlot.typeId]++;
     });
 
-    // ── 第2パス：maxWork未達なら予定休日も使って補完（制約上不可避の場合のフォールバック）
+    // ── 第2パス：maxWork未達なら予定休日＋スロット未設定日も使って補完 ──────
+    // スロット枠設定の合計可能出勤数がmaxWorkを下回る場合も、できる限り出勤日数を確保する
     if (getMonthWork(s.id) < maxWork) {
       DATES.forEach(day => {
         if (getMonthWork(s.id) >= maxWork) return;
         if (!canAssign(s, day)) return;
         const slots = daySlots[day] || [];
-        if (slots.length === 0) return;
-        const underfilled = slots.filter(sl => {
-          const assigned = staff.filter(x => sched[x.id][day] === sl.typeId).length;
-          return assigned < sl.required;
-        });
-        const candidateSlots = underfilled.length > 0 ? underfilled : slots;
+        let candidateSlots;
+        if (slots.length > 0) {
+          // スロット設定あり → 未充足優先、なければ任意スロット
+          const underfilled = slots.filter(sl => {
+            const assigned = staff.filter(x => sched[x.id][day] === sl.typeId).length;
+            return assigned < sl.required;
+          });
+          candidateSlots = underfilled.length > 0 ? underfilled : slots;
+        } else {
+          // スロット未設定日 → シフト種別から最も出勤回数が少ないものを使う
+          if (types.length === 0) return;
+          candidateSlots = types.map(t => ({ typeId: t.id, required: 0 }));
+        }
         const bestSlot = [...candidateSlots].sort((a, b) =>
           (typeCount[s.id][a.typeId]||0) - (typeCount[s.id][b.typeId]||0)
         )[0];
