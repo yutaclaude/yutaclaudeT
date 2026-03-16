@@ -276,6 +276,7 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
     }
 
     // ── 第1パス：予定休日をスキップして出勤日を埋める ──────────────────
+    // スロット設定あり日は必要人数の上限を厳守（満員なら割り当てスキップ）
     DATES.forEach(day => {
       if (getMonthWork(s.id) >= maxWork) return;
       if (planned.has(day)) return;          // 均等配置済みの休日予定日はスキップ
@@ -286,8 +287,8 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
         const assigned = staff.filter(x => sched[x.id][day] === sl.typeId).length;
         return assigned < sl.required;
       });
-      const candidateSlots = underfilled.length > 0 ? underfilled : slots;
-      const bestSlot = [...candidateSlots].sort((a, b) =>
+      if (underfilled.length === 0) return;  // 全スロット上限達成 → この日はスキップ（人数上限厳守）
+      const bestSlot = [...underfilled].sort((a, b) =>
         (typeCount[s.id][a.typeId]||0) - (typeCount[s.id][b.typeId]||0)
       )[0];
       sched[s.id][day] = bestSlot.typeId;
@@ -295,7 +296,7 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
     });
 
     // ── 第2パス：maxWork未達なら予定休日＋スロット未設定日も使って補完 ──────
-    // スロット枠設定の合計可能出勤数がmaxWorkを下回る場合も、できる限り出勤日数を確保する
+    // スロット設定あり日は引き続き上限厳守。スロット未設定日のみ追加で割り当て可
     if (getMonthWork(s.id) < maxWork) {
       DATES.forEach(day => {
         if (getMonthWork(s.id) >= maxWork) return;
@@ -303,12 +304,13 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
         const slots = daySlots[day] || [];
         let candidateSlots;
         if (slots.length > 0) {
-          // スロット設定あり → 未充足優先、なければ任意スロット
+          // スロット設定あり → 未充足スロットのみ対象（上限厳守）
           const underfilled = slots.filter(sl => {
             const assigned = staff.filter(x => sched[x.id][day] === sl.typeId).length;
             return assigned < sl.required;
           });
-          candidateSlots = underfilled.length > 0 ? underfilled : slots;
+          if (underfilled.length === 0) return; // 全スロット満員 → スキップ
+          candidateSlots = underfilled;
         } else {
           // スロット未設定日 → シフト種別から最も出勤回数が少ないものを使う
           if (types.length === 0) return;
