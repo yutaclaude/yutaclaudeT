@@ -324,13 +324,41 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
       });
     }
 
-    // 目標未達の場合は違反として記録（スロット上限・連勤・週休制約で物理的に割り当て不可能だった場合）
+    // ── 第3パス：スロット上限より必須休日数を優先（最終保証） ────────────────
+    // パス1・2でもmaxWork未達の場合はスロット上限を無視してでも必ず出勤を埋める
+    // （連勤・週休制約は引き続き守る）
+    if (getMonthWork(s.id) < maxWork) {
+      DATES.forEach(day => {
+        if (getMonthWork(s.id) >= maxWork) return;
+        if (!canAssign(s, day)) return;  // 連勤・週休・月上限制約のみチェック
+        const slots = daySlots[day] || [];
+        let candidateSlots;
+        if (slots.length > 0) {
+          // 未充足スロット優先だが、全満員でもスロット上限を無視して割り当て（必須休日数優先）
+          const underfilled = slots.filter(sl => {
+            const assigned = staff.filter(x => sched[x.id][day] === sl.typeId).length;
+            return assigned < sl.required;
+          });
+          candidateSlots = underfilled.length > 0 ? underfilled : slots;
+        } else {
+          if (types.length === 0) return;
+          candidateSlots = types.map(t => ({ typeId: t.id, required: 0 }));
+        }
+        const bestSlot = [...candidateSlots].sort((a, b) =>
+          (typeCount[s.id][a.typeId]||0) - (typeCount[s.id][b.typeId]||0)
+        )[0];
+        sched[s.id][day] = bestSlot.typeId;
+        typeCount[s.id][bestSlot.typeId]++;
+      });
+    }
+
+    // 目標未達の場合は違反として記録（連勤・週休制約のみが原因 ── スロット不足は第3パスで解消済み）
     const achieved = getMonthWork(s.id);
     if (achieved < maxWork) {
       const actualRest = DAYS_IN_MONTH - achieved - paidCount;
       violations.push({
         day: null, staffId: s.id, severity: "warning",
-        message: `${s.name}：出勤 ${achieved}日（目標 ${maxWork}日）／休日 ${actualRest}日（設定 ${s.requiredDaysOff || 0}日）── スロット上限・連勤・週休制約により ${maxWork - achieved}日分を割り当てられませんでした`,
+        message: `${s.name}：出勤 ${achieved}日（目標 ${maxWork}日）／休日 ${actualRest}日（設定 ${s.requiredDaysOff || 0}日）── 連勤・週休制約により ${maxWork - achieved}日分を割り当てられませんでした`,
       });
     }
   });
