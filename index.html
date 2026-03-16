@@ -253,33 +253,37 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
     });
   });
 
-  // ─ 必須休日数を正確に守る補完パス（休日を月全体に均等分散）──────────────
-  // 目標：各スタッフの出勤日数 = DAYS_IN_MONTH − requiredDaysOff − 有給日数
-  //   かつ休日を月前半・後半に均等に配置する
-  staff.forEach(s => {
-    const paidDates  = new Set(DATES.filter(d => sched[s.id][d] === "paid"));
-    const paidCount  = paidDates.size;
-    const maxWork    = Math.max(0, DAYS_IN_MONTH - (s.requiredDaysOff || 0) - paidCount);
+  // ─ 補完パス ───────────────────────────────────────────────
+  // 実行順：【全スタッフ パス1+2（スロット上限厳守）】→【未達スタッフのみ パス3（上限解除・最終手段）】
+  // ※パス3を後回しにすることで「上限内で解決できるスタッフ」が先に枠を使い切り、
+  //   上限超過が本当に必要な場合だけパス3が発動するようにする
 
-    // ── 休日を月全体に均等配置（事前プランニング）───────────────────────
-    // 有給以外の日に必須休日数を等間隔で振り分ける
-    const freeDates  = DATES.filter(d => !paidDates.has(d));
-    const needed     = s.requiredDaysOff || 0;
-    const planned    = new Set();
+  // 事前：各スタッフの休日均等配置プランを計算
+  const plannedRestMap = new Map();
+  staff.forEach(s => {
+    const paidDates = new Set(DATES.filter(d => sched[s.id][d] === "paid"));
+    const freeDates = DATES.filter(d => !paidDates.has(d));
+    const needed    = s.requiredDaysOff || 0;
+    const planned   = new Set();
     if (needed > 0 && freeDates.length > 0) {
       const step = freeDates.length / needed;
       for (let i = 0; i < needed; i++) {
-        // 各区間の中央付近の日を休日候補とする
         const idx = Math.min(Math.round(i * step + step / 2 - 0.5), freeDates.length - 1);
         planned.add(freeDates[idx]);
       }
     }
+    plannedRestMap.set(s.id, { planned, paidDates });
+  });
 
-    // ── 第1パス：予定休日をスキップして出勤日を埋める ──────────────────
-    // スロット設定あり日は必要人数の上限を厳守（満員なら割り当てスキップ）
+  // ── パス1+2：全スタッフ、スロット上限厳守で出勤を埋める ──────────────────
+  staff.forEach(s => {
+    const { planned, paidDates } = plannedRestMap.get(s.id);
+    const maxWork = Math.max(0, DAYS_IN_MONTH - (s.requiredDaysOff || 0) - paidDates.size);
+
+    // パス1：予定休日スキップ＋スロット上限厳守
     DATES.forEach(day => {
       if (getMonthWork(s.id) >= maxWork) return;
-      if (planned.has(day)) return;          // 均等配置済みの休日予定日はスキップ
+      if (planned.has(day)) return;
       if (!canAssign(s, day)) return;
       const slots = daySlots[day] || [];
       if (slots.length === 0) return;
@@ -287,7 +291,7 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
         const assigned = staff.filter(x => sched[x.id][day] === sl.typeId).length;
         return assigned < sl.required;
       });
-      if (underfilled.length === 0) return;  // 全スロット上限達成 → この日はスキップ（人数上限厳守）
+      if (underfilled.length === 0) return; // 満員 → スキップ（上限厳守）
       const bestSlot = [...underfilled].sort((a, b) =>
         (typeCount[s.id][a.typeId]||0) - (typeCount[s.id][b.typeId]||0)
       )[0];
@@ -295,8 +299,7 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
       typeCount[s.id][bestSlot.typeId]++;
     });
 
-    // ── 第2パス：maxWork未達なら予定休日＋スロット未設定日も使って補完 ──────
-    // スロット設定あり日は引き続き上限厳守。スロット未設定日のみ追加で割り当て可
+    // パス2：予定休日日・スロット未設定日も使って補完（スロット上限は引き続き厳守）
     if (getMonthWork(s.id) < maxWork) {
       DATES.forEach(day => {
         if (getMonthWork(s.id) >= maxWork) return;
@@ -304,15 +307,13 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
         const slots = daySlots[day] || [];
         let candidateSlots;
         if (slots.length > 0) {
-          // スロット設定あり → 未充足スロットのみ対象（上限厳守）
           const underfilled = slots.filter(sl => {
             const assigned = staff.filter(x => sched[x.id][day] === sl.typeId).length;
             return assigned < sl.required;
           });
-          if (underfilled.length === 0) return; // 全スロット満員 → スキップ
+          if (underfilled.length === 0) return; // 満員 → スキップ（上限厳守）
           candidateSlots = underfilled;
         } else {
-          // スロット未設定日 → シフト種別から最も出勤回数が少ないものを使う
           if (types.length === 0) return;
           candidateSlots = types.map(t => ({ typeId: t.id, required: 0 }));
         }
@@ -323,22 +324,27 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
         typeCount[s.id][bestSlot.typeId]++;
       });
     }
+  });
 
-    // ── 第3パス：スロット上限より必須休日数を優先（最終保証） ────────────────
-    // パス1・2でもmaxWork未達の場合はスロット上限を無視してでも必ず出勤を埋める
-    // （連勤・週休制約は引き続き守る）
+  // ── パス3：パス1+2完了後もmaxWork未達のスタッフのみ、スロット上限を解除して補完 ──
+  // 全スタッフのパス1+2が終わった後に実行するため、
+  // 「上限内で解決できたスタッフ」の枠消費が確定してからスロット超過を最小限に発動する
+  staff.forEach(s => {
+    const { paidDates } = plannedRestMap.get(s.id);
+    const maxWork = Math.max(0, DAYS_IN_MONTH - (s.requiredDaysOff || 0) - paidDates.size);
+
     if (getMonthWork(s.id) < maxWork) {
       DATES.forEach(day => {
         if (getMonthWork(s.id) >= maxWork) return;
-        if (!canAssign(s, day)) return;  // 連勤・週休・月上限制約のみチェック
+        if (!canAssign(s, day)) return;
         const slots = daySlots[day] || [];
         let candidateSlots;
         if (slots.length > 0) {
-          // 未充足スロット優先だが、全満員でもスロット上限を無視して割り当て（必須休日数優先）
           const underfilled = slots.filter(sl => {
             const assigned = staff.filter(x => sched[x.id][day] === sl.typeId).length;
             return assigned < sl.required;
           });
+          // 未充足スロット優先、全満員の場合のみ上限解除（必須休日数保証のための最終手段）
           candidateSlots = underfilled.length > 0 ? underfilled : slots;
         } else {
           if (types.length === 0) return;
@@ -352,8 +358,9 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
       });
     }
 
-    // 目標未達の場合は違反として記録（連勤・週休制約のみが原因 ── スロット不足は第3パスで解消済み）
-    const achieved = getMonthWork(s.id);
+    // 目標未達の場合は違反として記録（連勤・週休制約で物理的に不可能だった場合のみ）
+    const paidCount = paidDates.size;
+    const achieved  = getMonthWork(s.id);
     if (achieved < maxWork) {
       const actualRest = DAYS_IN_MONTH - achieved - paidCount;
       violations.push({
