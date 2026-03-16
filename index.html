@@ -729,7 +729,7 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
     const val  = sched?.[staffId]?.[day];
     const type = val && val !== "off" && val !== "paid" ? types.find(t => t.id === val) : null;
     if (val === "paid") return { label: "有", fg: PAID_COLOR,  bg: "#ede9fe" };
-    if (val === "off")  return { label: "休み", fg: "#ef4444",   bg: "#fee2e2" };
+    if (val === "off")  return { label: "休",   fg: "#ef4444",   bg: "#fff1f2" };
     if (type)           return { label: type.name.slice(0,2), fg: type.color, bg: type.color+"25" };
     if ((daySlots[day]||[]).length > 0) return { label: "休", fg: "#ef4444", bg: "#fff1f2" };
     return { label: "—", fg: "#e5e7eb", bg: "#fff" };
