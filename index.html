@@ -1,68 +1,74 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>オートシフト — シフト管理</title>
-  <!-- Tailwind CSS -->
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>オートシフト</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.development.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.development.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
-  <!-- React 18 -->
-  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <!-- Babel (JSX transform) -->
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  <!-- html2pdf.js (PDF出力) -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
-  <style>
-    @media print {
-      @page { size: A4 landscape; margin: 7mm; }
-      .no-print { display: none !important; }
-      .print-only { display: block !important; }
-      body { background: white !important; font-family: sans-serif; }
-    }
-    .print-only { display: none; }
-  </style>
 </head>
 <body>
   <div id="root"></div>
-
   <script type="text/babel">
-const { useState, useEffect } = React;
+    const { useState, useEffect } = React;
 
-// ─── localStorage ヘルパー ────────────────────────────────────
-function loadLS(key, fallback) {
-  try {
-    const v = localStorage.getItem(key);
-    return v ? JSON.parse(v) : fallback;
-  } catch { return fallback; }
-}
-function saveLS(key, value) {
-  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
-}
+    // ─── localStorage ユーティリティ ──────────────────────────
+    function loadLS(key, def) {
+      try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : def; }
+      catch { return def; }
+    }
+    function saveLS(key, val) {
+      try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
+    }
 
-
-// ─── 定数（月変更に対応するため let で宣言） ──────────────────
-let YEAR = 2026, MONTH = 3;
-let NEXT_MONTH = 4, NEXT_YEAR = 2026;
+// ─── 定数 ────────────────────────────────────────────────────
+const _today = new Date();
+let YEAR = _today.getFullYear(), MONTH = _today.getMonth() + 1;
+let NEXT_MONTH = MONTH % 12 + 1, NEXT_YEAR = MONTH === 12 ? YEAR + 1 : YEAR;
 let DAYS_IN_MONTH = new Date(YEAR, MONTH, 0).getDate();
 let DATES = Array.from({ length: DAYS_IN_MONTH }, (_, i) => i + 1);
-let HOLIDAYS = new Set([20]); // 初期値：春分の日
+let HOLIDAYS = new Set(); // getHolidaysForMonth定義後に初期化
 
-// 向こう半年分の希望入力用・月別祝日マップ（2026年）
+// 月別祝日マップ（2026年・全月）
 const HOLIDAYS_2026 = {
+  1: [1, 12],      // 元日・成人の日
+  2: [11, 23],     // 建国記念日・天皇誕生日
   3: [20],         // 春分の日
   4: [29],         // 昭和の日
   5: [3, 4, 5, 6], // 憲法記念日・みどりの日・こどもの日・振替
   6: [],
   7: [20],         // 海の日（第3月曜）
   8: [11],         // 山の日
+  9: [21, 22],     // 敬老の日・振替
+  10: [12],        // スポーツの日（第2月曜）
+  11: [3, 23],     // 文化の日・勤労感謝の日
+  12: [],
+};
+// 月別祝日マップ（2027年）
+const HOLIDAYS_2027 = {
+  1: [1, 11],      // 元日・成人の日
+  2: [11, 23],     // 建国記念日・天皇誕生日
+  3: [20],         // 春分の日
+  4: [29],         // 昭和の日
+  5: [3, 4, 5],    // 憲法記念日・みどりの日・こどもの日
+  6: [],
+  7: [19],         // 海の日（第3月曜）
+  8: [11],         // 山の日
+  9: [20, 21],     // 敬老の日・振替
+  10: [11],        // スポーツの日（第2月曜）
+  11: [3, 23],     // 文化の日・勤労感謝の日
+  12: [],
 };
 function getHolidaysForMonth(year, month) {
   if (year === 2026) return new Set(HOLIDAYS_2026[month] || []);
+  if (year === 2027) return new Set(HOLIDAYS_2027[month] || []);
   return new Set();
 }
+HOLIDAYS = getHolidaysForMonth(YEAR, MONTH);
 
-// 対象月をまとめて更新（グローバル変数を書き換え → React再レンダー後に新値が反映される）
 function updateCurrentMonth(year, month) {
   YEAR          = year;
   MONTH         = month;
@@ -114,10 +120,9 @@ const INIT_TYPES = [
 ];
 
 const MAIN_TABS = [
-  { id: "staff",    label: "① スタッフ設定" },
-  { id: "slots",    label: "② シフト枠設定" },
-  { id: "requests", label: "③ 希望入力"     },
-  { id: "auto",     label: "④ 自動生成・印刷", highlight: true },
+  { id: "requests", label: "① スタッフ・希望入力" },
+  { id: "slots",    label: "② シフト枠設定"       },
+  { id: "auto",     label: "③ 自動生成・印刷", highlight: true },
 ];
 
 // 有給の表示設定
@@ -125,7 +130,10 @@ const PAID_COLOR = "#7c3aed";
 
 // ─── 自動生成アルゴリズム ─────────────────────────────────────
 // prevWeekWork: { [staffId]: number } = 前月の最終週（土〜）に出勤した日数
-function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
+function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}, monthlyOverrides = {}) {
+  // 月別上書き条件をマージ（requiredDaysOff / maxConsecutive / weeklyDaysOff / minWorkDays）
+  staff = staff.map(s => ({ ...s, ...(monthlyOverrides[s.id] || {}) }));
+
   const sched     = {};
   const typeCount = {}; // 均等化用カウンタ: [staffId][typeId]
 
@@ -195,25 +203,279 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
     });
   });
 
-  // 日ごとに割り当て（カレンダー順1→31 ── 連勤チェックが実際の前後関係と整合し月末の1/2不足を防ぐ）
-  const sortedDates = [...DATES];
+  // ═══════════════════════════════════════════════════════════════════════════
+  // REST-first アルゴリズム：先に全スタッフの休日を最適配置し、次にシフト種別を割り当てる
+  // Phase 1  : 休日計画 ── 連勤・週休・月休日数を「すべて事前に」満たす休日パターンを決定
+  // Phase 1.5: 休日計画の検証・修正 ── Phase 1 で漏れた違反を局所修正
+  // Phase 2  : 需給バランス調整 ── 人手不足日の休日を余剰日へスワップ
+  // Phase 3  : シフト種別の割り当て ── 出勤確定日にタイプを付与
+  // Phase 4  : 修復パス ── 残ったスロット不足を局所探索で解消
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const keyRoleStaff = staff.filter(s => KEY_ROLES.has(s.role));
+  const dayDemand = d => (daySlots[d] || []).reduce((s, sl) => s + sl.required, 0);
+
+  // ── Phase 1：REST DAY PLANNING ─────────────────────────────────────────
+  // 各スタッフの休日を制約（連勤上限・週休・月休日数）＋需要を考慮して配置
+  const restPlan = {}; // staffId -> Set (追加休日。off/paid は sched に既にロック済み)
+
+  staff.forEach(s => {
+    const offSet  = new Set(DATES.filter(d => sched[s.id][d] === "off"));
+    const paidSet = new Set(DATES.filter(d => sched[s.id][d] === "paid"));
+    const reqSet  = new Set(DATES.filter(d => requests[s.id]?.[d] === "required")); // 必出
+    const neededAdditional = Math.max(0, (s.requiredDaysOff || 0) - offSet.size);
+    const candidates = DATES.filter(d => !offSet.has(d) && !paidSet.has(d) && !reqSet.has(d));
+
+    const planned = new Set();
+
+    for (let r = 0; r < neededAdditional && r < candidates.length; r++) {
+      let bestDay = null, bestScore = -Infinity;
+
+      for (const d of candidates) {
+        if (planned.has(d)) continue;
+        const allRest = new Set([...offSet, ...paidSet, ...planned, d]);
+
+        // (a) 需要が低い日 → 休日に適する
+        const demandScore = -dayDemand(d) * 3;
+
+        // (b) 長い連勤区間を分断するなら最重要
+        let wBefore = 0;
+        for (let dd = d - 1; dd >= 0; dd--) {
+          if (dd === 0) { wBefore += prevWeekWork[s.id] || 0; break; }
+          if (allRest.has(dd)) break;
+          wBefore++;
+        }
+        let wAfter = 0;
+        for (let dd = d + 1; dd <= DAYS_IN_MONTH; dd++) {
+          if (allRest.has(dd)) break;
+          wAfter++;
+        }
+        const breakScore = (wBefore + 1 + wAfter > s.maxConsecutive) ? 300 : 0;
+
+        // (c) 週（土〜金）の休日が不足しているなら加点
+        const wStart = getWeekSatStart(d);
+        let weekRest = 0;
+        for (let dd = Math.max(1, wStart); dd < Math.min(DAYS_IN_MONTH + 1, wStart + 7); dd++) {
+          if (allRest.has(dd)) weekRest++;
+        }
+        const weekBalance = weekRest < s.weeklyDaysOff ? 100 : 0;
+
+        // (d) 他の休日から離れている → 均等分散
+        let minDist = DAYS_IN_MONTH;
+        for (const rd of allRest) { if (rd !== d) minDist = Math.min(minDist, Math.abs(d - rd)); }
+        const spacingScore = Math.min(minDist, 7) * 5;
+
+        const total = demandScore + breakScore + weekBalance + spacingScore;
+        if (total > bestScore) { bestScore = total; bestDay = d; }
+      }
+      if (bestDay !== null) planned.add(bestDay);
+    }
+    restPlan[s.id] = planned;
+  });
+
+  // ── Phase 1.5：休日計画の検証・修正 ────────────────────────────────────
+  // Phase 1 は貪欲法のため、まれに連勤超過や週休不足が残る。ここで局所修正する。
+  for (let fixIter = 0; fixIter < 30; fixIter++) {
+    let anyFix = false;
+
+    staff.forEach(s => {
+      const offSet  = new Set(DATES.filter(d => sched[s.id][d] === "off"));
+      const paidSet = new Set(DATES.filter(d => sched[s.id][d] === "paid"));
+      const reqSet  = new Set(DATES.filter(d => requests[s.id]?.[d] === "required"));
+      const allRest = new Set([...offSet, ...paidSet, ...restPlan[s.id]]);
+
+      // --- 連勤チェック＆修正 ---
+      let streak = 0, streakStart = 1;
+      for (let d = 1; d <= DAYS_IN_MONTH + 1; d++) {
+        if (d <= DAYS_IN_MONTH && !allRest.has(d)) {
+          if (streak === 0) streakStart = d;
+          streak++;
+        } else {
+          if (streak > s.maxConsecutive) {
+            // 連勤中間付近で需要最低の日を休日に追加
+            const mid = streakStart + Math.floor(s.maxConsecutive * 0.5);
+            let bestD = null, bestDem = Infinity;
+            for (let dd = Math.max(streakStart, mid - 3); dd <= Math.min(streakStart + streak - 1, mid + 3); dd++) {
+              if (reqSet.has(dd) || allRest.has(dd)) continue;
+              if (dayDemand(dd) < bestDem) { bestDem = dayDemand(dd); bestD = dd; }
+            }
+            if (bestD === null) { // 中間付近に候補がなければ全域探索
+              for (let dd = streakStart; dd < streakStart + streak; dd++) {
+                if (reqSet.has(dd) || allRest.has(dd)) continue;
+                if (dayDemand(dd) < bestDem) { bestDem = dayDemand(dd); bestD = dd; }
+              }
+            }
+            if (bestD !== null) {
+              restPlan[s.id].add(bestD);
+              allRest.add(bestD);
+              anyFix = true;
+              // 休日が多すぎたら、安全に除去できる日を1つ外す
+              if (offSet.size + restPlan[s.id].size > (s.requiredDaysOff || 0)) {
+                let bestRm = null, bestRmScore = -1;
+                for (const rd of restPlan[s.id]) {
+                  if (rd === bestD) continue;
+                  const test = new Set(allRest); test.delete(rd);
+                  let ok = true, ts = 0;
+                  for (let dd = 1; dd <= DAYS_IN_MONTH; dd++) {
+                    if (test.has(dd)) ts = 0; else { ts++; if (ts > s.maxConsecutive) { ok = false; break; } }
+                  }
+                  if (ok) {
+                    const ws2 = [...new Set(DATES.map(dd => getWeekSatStart(dd)))];
+                    for (const ws of ws2) {
+                      const wd2 = Array.from({length:7},(_,i)=>ws+i).filter(dd=>dd>=1&&dd<=DAYS_IN_MONTH);
+                      if (wd2.filter(dd => test.has(dd)).length < s.weeklyDaysOff) { ok = false; break; }
+                    }
+                  }
+                  if (ok && dayDemand(rd) > bestRmScore) { bestRmScore = dayDemand(rd); bestRm = rd; }
+                }
+                if (bestRm !== null) { restPlan[s.id].delete(bestRm); allRest.delete(bestRm); }
+              }
+            }
+          }
+          streak = 0;
+        }
+      }
+
+      // --- 週休チェック＆修正 ---
+      const weekStarts = [...new Set(DATES.map(d => getWeekSatStart(d)))];
+      weekStarts.forEach(wStart => {
+        const wDays = Array.from({length:7},(_,i)=>wStart+i).filter(d=>d>=1&&d<=DAYS_IN_MONTH);
+        const wRest = wDays.filter(d => allRest.has(d)).length;
+        if (wRest < s.weeklyDaysOff) {
+          const cands = wDays.filter(d => !allRest.has(d) && !reqSet.has(d));
+          if (cands.length > 0) {
+            const bestD = cands.reduce((a, b) => dayDemand(a) <= dayDemand(b) ? a : b);
+            restPlan[s.id].add(bestD);
+            allRest.add(bestD);
+            anyFix = true;
+            // 超過分を別の週から外す
+            if (offSet.size + restPlan[s.id].size > (s.requiredDaysOff || 0)) {
+              let bestRm = null, bestRmScore = -1;
+              for (const rd of restPlan[s.id]) {
+                if (getWeekSatStart(rd) === wStart) continue; // この週からは外さない
+                const test = new Set(allRest); test.delete(rd);
+                let ok = true, ts = 0;
+                for (let dd = 1; dd <= DAYS_IN_MONTH; dd++) {
+                  if (test.has(dd)) ts = 0; else { ts++; if (ts > s.maxConsecutive) { ok = false; break; } }
+                }
+                if (ok) {
+                  const rdW = Array.from({length:7},(_,i)=>getWeekSatStart(rd)+i).filter(dd=>dd>=1&&dd<=DAYS_IN_MONTH);
+                  if (rdW.filter(dd => test.has(dd)).length >= s.weeklyDaysOff) {
+                    if (dayDemand(rd) > bestRmScore) { bestRmScore = dayDemand(rd); bestRm = rd; }
+                  }
+                }
+              }
+              if (bestRm !== null) { restPlan[s.id].delete(bestRm); allRest.delete(bestRm); }
+            }
+          }
+        }
+      });
+    });
+    if (!anyFix) break;
+  }
+
+  // ── Phase 2：需給バランス調整 ──────────────────────────────────────────
+  // 人手不足日のスタッフ休日を、人手余剰日にスワップして充足率を最大化する
+  for (let balIter = 0; balIter < 15; balIter++) {
+    let improved = false;
+
+    DATES.forEach(day => {
+      const totalReq = dayDemand(day);
+      if (totalReq === 0) return;
+      // この日の出勤予定人数（off/paid/restPlan に含まれていないスタッフ）
+      let workers = staff.filter(s => {
+        if (sched[s.id][day] === "off" || sched[s.id][day] === "paid") return false;
+        return !restPlan[s.id].has(day);
+      }).length;
+      if (workers >= totalReq) return; // 充足済み
+
+      // この日に休日計画されているスタッフ（ユーザー指定 off は対象外）
+      const restingHere = staff.filter(s =>
+        restPlan[s.id].has(day) && requests[s.id]?.[day] !== "off"
+      );
+
+      for (const s of restingHere) {
+        if (workers >= totalReq) break;
+        const offSet  = new Set(DATES.filter(d => sched[s.id][d] === "off"));
+        const paidSet = new Set(DATES.filter(d => sched[s.id][d] === "paid"));
+
+        // この人の休日を day から swapTarget に移動できるか
+        const swapTarget = DATES.find(d => {
+          if (d === day) return false;
+          if (sched[s.id][d] === "off" || sched[s.id][d] === "paid") return false;
+          if (restPlan[s.id].has(d)) return false;
+          if (requests[s.id]?.[d] === "required") return false;
+          // swapTarget 日は余剰人員があるか
+          const dWorkers = staff.filter(x => {
+            if (sched[x.id][d] === "off" || sched[x.id][d] === "paid") return false;
+            return !restPlan[x.id].has(d);
+          }).length;
+          if (dWorkers <= dayDemand(d)) return false; // 余剰なし
+
+          // スワップ後の制約チェック（連勤・週休）
+          const testRest = new Set(restPlan[s.id]);
+          testRest.delete(day);
+          testRest.add(d);
+          const allRest = new Set([...offSet, ...paidSet, ...testRest]);
+
+          let ts = 0;
+          for (let dd = 1; dd <= DAYS_IN_MONTH; dd++) {
+            if (allRest.has(dd)) ts = 0; else { ts++; if (ts > s.maxConsecutive) return false; }
+          }
+          const ws = [...new Set(DATES.map(dd => getWeekSatStart(dd)))];
+          for (const wStart of ws) {
+            const wd = Array.from({length:7},(_,i)=>wStart+i).filter(dd=>dd>=1&&dd<=DAYS_IN_MONTH);
+            if (wd.filter(dd => allRest.has(dd)).length < s.weeklyDaysOff) return false;
+          }
+          return true;
+        });
+
+        if (swapTarget !== undefined) {
+          restPlan[s.id].delete(day);
+          restPlan[s.id].add(swapTarget);
+          workers++;
+          improved = true;
+        }
+      }
+    });
+    if (!improved) break;
+  }
+
+  // ── Phase 2.5：休日計画を sched に反映 ─────────────────────────────────
+  // restPlan の休日を sched に書き込み、出勤日は null のまま残す
+  staff.forEach(s => {
+    restPlan[s.id].forEach(d => {
+      if (sched[s.id][d] === null) sched[s.id][d] = "off";
+    });
+  });
+
+  // ── Phase 3：シフト種別の割り当て ──────────────────────────────────────
+  // 出勤日（sched = null）にシフトタイプを割り当てる。難しい日から先に処理。
+  const sortedDates = [...DATES].sort((a, b) => {
+    const workersA = staff.filter(s => sched[s.id][a] === null).length;
+    const workersB = staff.filter(s => sched[s.id][b] === null).length;
+    const reqA = dayDemand(a), reqB = dayDemand(b);
+    const diffA = reqA - workersA, diffB = reqB - workersB;
+    if (diffA !== diffB) return diffB - diffA; // 不足が大きい日を先に
+    return a - b;
+  });
   sortedDates.forEach(day => {
     const slots = [...(daySlots[day] || [])].sort((a, b) => {
       const sa = types.find(t => t.id === a.typeId)?.start || "";
       const sb = types.find(t => t.id === b.typeId)?.start || "";
-      return sa.localeCompare(sb); // 早番→遅番の順に処理
+      return sa.localeCompare(sb);
     });
 
+    // スロットに出勤者を割り当て
     slots.forEach(({ typeId, required }) => {
-      // 既にこのtypeIdに割り当て済みの人数を確認し、本当に必要な追加人数のみ割り当てる
       const alreadyOnType = staff.filter(s => sched[s.id][day] === typeId).length;
-      const stillNeeded   = required - alreadyOnType;
-      if (stillNeeded <= 0) return; // 既に充足しているならスキップ
+      const stillNeeded = required - alreadyOnType;
+      if (stillNeeded <= 0) return;
 
-      // 全制約を守った候補のみ収集（フォールバックなし）
-      const pool = staff.filter(s => canAssign(s, day));
-      // 優先順: 必出 > 役職カバー必要時は役職スタッフ優先 > できれば休み後回し > minWorkDays未達 > ペース調整 > typeCount均等化
+      // pool = この日に出勤予定（null）のスタッフ
+      const pool = staff.filter(s => sched[s.id][day] === null);
       const hasRoleCovered = staff.some(x => KEY_ROLES.has(x.role) && isWorking(sched[x.id][day]));
+
       pool.sort((a, b) => {
         // ① 必出は最優先
         const aReq = requests[a.id]?.[day] === "required" ? 0 : 1;
@@ -225,247 +487,122 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
           const bRole = KEY_ROLES.has(b.role) ? 0 : 1;
           if (aRole !== bRole) return aRole - bRole;
         }
-        // ③ できれば休み → 後回し
-        const ap = requests[a.id]?.[day] === "prefer" ? 1 : 0;
-        const bp = requests[b.id]?.[day] === "prefer" ? 1 : 0;
-        if (ap !== bp) return ap - bp;
-        // ④ minWorkDays未達 → 優先
-        const aBelowMin = (a.minWorkDays||0) > 0 && getMonthWork(a.id) < a.minWorkDays ? 0 : 1;
-        const bBelowMin = (b.minWorkDays||0) > 0 && getMonthWork(b.id) < b.minWorkDays ? 0 : 1;
-        if (aBelowMin !== bBelowMin) return aBelowMin - bBelowMin;
-        // ⑤ 緊急度調整：「残りカレンダー日数に対してあと何日出勤が必要か」の割合が
-        //   高いスタッフを優先 → 月末に向かって出勤が必要なスタッフを先に埋め、
-        //   月初に出勤が集中して月末が空になる問題を解消する
-        //   urgency = 残り必要出勤日数 ÷ 残りカレンダー日数（本日含む）
-        const daysLeft  = Math.max(1, DAYS_IN_MONTH - day + 1);
-        const paidA     = DATES.filter(d => sched[a.id][d] === "paid").length;
-        const paidB     = DATES.filter(d => sched[b.id][d] === "paid").length;
-        const maxWA     = Math.max(1, DAYS_IN_MONTH - (a.requiredDaysOff||0) - paidA);
-        const maxWB     = Math.max(1, DAYS_IN_MONTH - (b.requiredDaysOff||0) - paidB);
-        const urgencyA  = Math.max(0, maxWA - getMonthWork(a.id)) / daysLeft;
-        const urgencyB  = Math.max(0, maxWB - getMonthWork(b.id)) / daysLeft;
-        if (Math.abs(urgencyA - urgencyB) > 0.01) return urgencyB - urgencyA; // 緊急度高い方を優先
-        // ⑥ typeCount均等化
+        // ③ typeCount均等化
         return (typeCount[a.id][typeId] || 0) - (typeCount[b.id][typeId] || 0);
       });
-      const toAssign = pool.slice(0, stillNeeded); // stillNeededのみ追加割り当て
 
-      toAssign.forEach(s => {
+      pool.slice(0, stillNeeded).forEach(s => {
         sched[s.id][day] = typeId;
         typeCount[s.id][typeId]++;
       });
 
-      const totalAssigned = alreadyOnType + toAssign.length;
+      const totalAssigned = alreadyOnType + Math.min(pool.length, stillNeeded);
       if (totalAssigned < required) {
         const typeName = types.find(t => t.id === typeId)?.name || typeId;
-        const isCritical = totalAssigned < ASSIGN_LIMIT;
         violations.push({
           day, typeId,
-          severity: isCritical ? "critical" : "error",
-          message: `${MONTH}/${day}（${getDayLabel(day)}）${typeName}：${required}名必要 → ${totalAssigned}名（月の休日数優先のため）${isCritical ? " ⚠ 限界値未満！" : ""}`,
+          severity: totalAssigned < ASSIGN_LIMIT ? "critical" : "error",
+          message: `${MONTH}/${day}（${getDayLabel(day)}）${typeName}：${required}名必要 → ${totalAssigned}名`,
         });
       }
     });
-  });
 
-  // ─ 補完パス ───────────────────────────────────────────────
-  // 実行順：【全スタッフ パス1+2（スロット上限厳守）】→【未達スタッフのみ パス3（上限解除・最終手段）】
-  // ※パス3を後回しにすることで「上限内で解決できるスタッフ」が先に枠を使い切り、
-  //   上限超過が本当に必要な場合だけパス3が発動するようにする
-
-  // 事前：各スタッフの休日均等配置プランを計算
-  const plannedRestMap = new Map();
-  staff.forEach(s => {
-    const paidDates = new Set(DATES.filter(d => sched[s.id][d] === "paid"));
-    const freeDates = DATES.filter(d => !paidDates.has(d));
-    const needed    = s.requiredDaysOff || 0;
-    const planned   = new Set();
-    if (needed > 0 && freeDates.length > 0) {
-      const step = freeDates.length / needed;
-      for (let i = 0; i < needed; i++) {
-        const idx = Math.min(Math.round(i * step + step / 2 - 0.5), freeDates.length - 1);
-        planned.add(freeDates[idx]);
+    // この日の残り null スタッフ（出勤予定だがスロット割り当てなし）→ 最も不足しているスロットに割り当て
+    staff.forEach(s => {
+      if (sched[s.id][day] !== null) return;
+      const slots2 = daySlots[day] || [];
+      if (slots2.length === 0) {
+        if (types.length > 0) {
+          const best = types.reduce((a, b) =>
+            (typeCount[s.id][a.id]||0) <= (typeCount[s.id][b.id]||0) ? a : b
+          );
+          sched[s.id][day] = best.id;
+          typeCount[s.id][best.id]++;
+        }
+        return;
       }
-    }
-    plannedRestMap.set(s.id, { planned, paidDates });
-  });
-
-  // ── パス1+2：全スタッフ、スロット上限厳守で出勤を埋める ──────────────────
-  staff.forEach(s => {
-    const { planned, paidDates } = plannedRestMap.get(s.id);
-    const maxWork = Math.max(0, DAYS_IN_MONTH - (s.requiredDaysOff || 0) - paidDates.size);
-
-    // パス1：予定休日スキップ＋スロット上限厳守
-    DATES.forEach(day => {
-      if (getMonthWork(s.id) >= maxWork) return;
-      if (planned.has(day)) return;
-      if (!canAssign(s, day)) return;
-      const slots = daySlots[day] || [];
-      if (slots.length === 0) return;
-      const underfilled = slots.filter(sl => {
-        const assigned = staff.filter(x => sched[x.id][day] === sl.typeId).length;
-        return assigned < sl.required;
-      });
-      if (underfilled.length === 0) return; // 満員 → スキップ（上限厳守）
-      const bestSlot = [...underfilled].sort((a, b) =>
-        (typeCount[s.id][a.typeId]||0) - (typeCount[s.id][b.typeId]||0)
-      )[0];
+      const bestSlot = [...slots2].sort((a, b) => {
+        const aGap = a.required - staff.filter(x => sched[x.id][day] === a.typeId).length;
+        const bGap = b.required - staff.filter(x => sched[x.id][day] === b.typeId).length;
+        if (aGap !== bGap) return bGap - aGap;
+        return (typeCount[s.id][a.typeId]||0) - (typeCount[s.id][b.typeId]||0);
+      })[0];
       sched[s.id][day] = bestSlot.typeId;
       typeCount[s.id][bestSlot.typeId]++;
     });
-
-    // パス2：予定休日日・スロット未設定日も使って補完（スロット上限は引き続き厳守）
-    if (getMonthWork(s.id) < maxWork) {
-      DATES.forEach(day => {
-        if (getMonthWork(s.id) >= maxWork) return;
-        if (!canAssign(s, day)) return;
-        const slots = daySlots[day] || [];
-        let candidateSlots;
-        if (slots.length > 0) {
-          const underfilled = slots.filter(sl => {
-            const assigned = staff.filter(x => sched[x.id][day] === sl.typeId).length;
-            return assigned < sl.required;
-          });
-          if (underfilled.length === 0) return; // 満員 → スキップ（上限厳守）
-          candidateSlots = underfilled;
-        } else {
-          if (types.length === 0) return;
-          candidateSlots = types.map(t => ({ typeId: t.id, required: 0 }));
-        }
-        const bestSlot = [...candidateSlots].sort((a, b) =>
-          (typeCount[s.id][a.typeId]||0) - (typeCount[s.id][b.typeId]||0)
-        )[0];
-        sched[s.id][day] = bestSlot.typeId;
-        typeCount[s.id][bestSlot.typeId]++;
-      });
-    }
   });
 
-  // ── パス3：パス1+2完了後もmaxWork未達のスタッフのみ、スロット上限を解除して補完 ──
-  // 全スタッフのパス1+2が終わった後に実行するため、
-  // 「上限内で解決できたスタッフ」の枠消費が確定してからスロット超過を最小限に発動する
-  staff.forEach(s => {
-    const { paidDates } = plannedRestMap.get(s.id);
-    const maxWork = Math.max(0, DAYS_IN_MONTH - (s.requiredDaysOff || 0) - paidDates.size);
-
-    if (getMonthWork(s.id) < maxWork) {
-      DATES.forEach(day => {
-        if (getMonthWork(s.id) >= maxWork) return;
-        if (!canAssign(s, day)) return;
-        const slots = daySlots[day] || [];
-        let candidateSlots;
-        if (slots.length > 0) {
-          const underfilled = slots.filter(sl => {
-            const assigned = staff.filter(x => sched[x.id][day] === sl.typeId).length;
-            return assigned < sl.required;
-          });
-          // 未充足スロット優先、全満員の場合のみ上限解除（必須休日数保証のための最終手段）
-          candidateSlots = underfilled.length > 0 ? underfilled : slots;
-        } else {
-          if (types.length === 0) return;
-          candidateSlots = types.map(t => ({ typeId: t.id, required: 0 }));
-        }
-        const bestSlot = [...candidateSlots].sort((a, b) =>
-          (typeCount[s.id][a.typeId]||0) - (typeCount[s.id][b.typeId]||0)
-        )[0];
-        sched[s.id][day] = bestSlot.typeId;
-        typeCount[s.id][bestSlot.typeId]++;
-      });
-    }
-
-    // 目標未達の場合は違反として記録（連勤・週休制約で物理的に不可能だった場合のみ）
-    const paidCount = paidDates.size;
-    const achieved  = getMonthWork(s.id);
-    if (achieved < maxWork) {
-      const actualRest = DAYS_IN_MONTH - achieved - paidCount;
-      violations.push({
-        day: null, staffId: s.id, severity: "warning",
-        message: `${s.name}：出勤 ${achieved}日（目標 ${maxWork}日）／休日 ${actualRest}日（設定 ${s.requiredDaysOff || 0}日）── 連勤・週休制約により ${maxWork - achieved}日分を割り当てられませんでした`,
-      });
-    }
-  });
-
-  // ─ 役職カバー確保パス ─────────────────────────────────────
-  // 毎日最低1名の店長/副店長/チーフが出勤するよう追加割り当て
-  const keyRoleStaff = staff.filter(s => KEY_ROLES.has(s.role));
-  if (keyRoleStaff.length > 0) {
-    const roleFillDates = [...DATES];
-    roleFillDates.forEach(day => {
-      if (keyRoleStaff.some(s => isWorking(sched[s.id][day]))) return; // 既にカバー済み
-      const slots = daySlots[day] || [];
-      if (slots.length === 0) return;
-      // 割り当て可能な役職スタッフを探す（typeCount均等化を維持）
-      const available = keyRoleStaff.filter(s => canAssign(s, day));
-      if (available.length === 0) return; // 後で事後チェックが拾う
-      // 未充足スロットのみ対象（スロット上限厳守）
-      const underfilledSlots = slots.filter(sl => {
-        const assigned = staff.filter(x => sched[x.id][day] === sl.typeId).length;
-        return assigned < sl.required;
-      });
-      if (underfilledSlots.length === 0) return; // 全スロット満員 → 役職カバー割り当て不可（事後チェックが警告）
-      const candidateSlots = underfilledSlots;
-      available.sort((a, b) => {
-        const aMin = Math.min(...candidateSlots.map(sl => typeCount[a.id][sl.typeId]||0));
-        const bMin = Math.min(...candidateSlots.map(sl => typeCount[b.id][sl.typeId]||0));
-        return aMin - bMin;
-      });
-      const s = available[0];
-      const bestSlot = [...candidateSlots].sort((a,b) =>
-        (typeCount[s.id][a.typeId]||0) - (typeCount[s.id][b.typeId]||0)
-      )[0];
-      sched[s.id][day] = bestSlot.typeId;
-      typeCount[s.id][bestSlot.typeId]++;
-    });
-  }
-
-  // ─ 必出補完パス ───────────────────────────────────────────
-  // 「必出」申請がある日に未割り当てのスタッフを強制的に割り当て
+  // ── Phase 4：必出補完 ──────────────────────────────────────────────────
+  // Phase 1 で必出日を休日から除外しているが、まれに未割り当ての場合をここで救済
   staff.forEach(s => {
     DATES.forEach(day => {
       if (requests[s.id]?.[day] !== "required") return;
-      if (isWorking(sched[s.id][day])) return; // 既に出勤割り当て済み
+      if (isWorking(sched[s.id][day])) return;
       const slots = daySlots[day] || [];
       if (slots.length === 0) {
         violations.push({ day, staffId: s.id, severity: "critical",
           message: `${s.name}：${MONTH}/${day}（${getDayLabel(day)}）必出ですがシフト枠がありません` });
         return;
       }
-      // 通常canAssign、月の勤務日数上限のみが原因なら必出で上書き
-      let ok = canAssign(s, day);
-      if (!ok) {
-        const paidDays2 = DATES.filter(d => sched[s.id][d] === "paid").length;
-        const maxWork2  = DAYS_IN_MONTH - (s.requiredDaysOff||0) - paidDays2;
-        const onlyMonthLimit = getMonthWork(s.id) >= maxWork2
-          && getConsecutive(s.id, day) < s.maxConsecutive
-          && getWeekWork(s.id, day)    < 7 - s.weeklyDaysOff;
-        if (onlyMonthLimit) {
-          ok = true;
-          violations.push({ day, staffId: s.id, severity: "warning",
-            message: `${s.name}：${MONTH}/${day} 必出により月の勤務日数上限を超過` });
-        }
-      }
-      if (!ok) {
-        violations.push({ day, staffId: s.id, severity: "critical",
-          message: `${s.name}：${MONTH}/${day}（${getDayLabel(day)}）必出ですが連勤・週休制約により割り当て不可` });
-        return;
-      }
-      // 未充足スロット優先、全満員でも必出なので割り当て（スロット超過警告あり）
-      const underfilledReq = slots.filter(sl => {
-        const assigned = staff.filter(x => sched[x.id][day] === sl.typeId).length;
-        return assigned < sl.required;
-      });
-      const reqCandidates = underfilledReq.length > 0 ? underfilledReq : slots;
-      if (underfilledReq.length === 0) {
+      // off → 出勤に上書き（休日数は超過するが必出を優先）
+      if (sched[s.id][day] === "off" && requests[s.id]?.[day] !== "off") {
         violations.push({ day, staffId: s.id, severity: "warning",
-          message: `${s.name}：${MONTH}/${day} 必出のためスロット上限を超過して割り当てました` });
+          message: `${s.name}：${MONTH}/${day} 必出のため休日を出勤に変更` });
       }
-      const bestSlot = [...reqCandidates].sort((a,b) =>
+      const underfilled = slots.filter(sl =>
+        staff.filter(x => sched[x.id][day] === sl.typeId).length < sl.required
+      );
+      const candidates = underfilled.length > 0 ? underfilled : slots;
+      if (underfilled.length === 0) {
+        violations.push({ day, staffId: s.id, severity: "warning",
+          message: `${s.name}：${MONTH}/${day} 必出のためスロット上限を超過して割り当て` });
+      }
+      const best = [...candidates].sort((a,b) =>
         (typeCount[s.id][a.typeId]||0) - (typeCount[s.id][b.typeId]||0)
       )[0];
-      sched[s.id][day] = bestSlot.typeId;
-      typeCount[s.id][bestSlot.typeId]++;
+      sched[s.id][day] = best.typeId;
+      typeCount[s.id][best.typeId]++;
     });
   });
+
+  // ── Phase 5：スロット不足の最終修復 ────────────────────────────────────
+  // 休日スワップによる修復（休日を余剰日に移動して不足日をカバー）
+  for (let repairIter = 0; repairIter < 10; repairIter++) {
+    let improved = false;
+    DATES.forEach(day => {
+      (daySlots[day] || []).forEach(({ typeId, required }) => {
+        if (staff.filter(s => sched[s.id][day] === typeId).length >= required) return;
+
+        // この日に休んでいるが、ユーザー指定 off/paid ではないスタッフ
+        const restingHere = staff.filter(s => {
+          if (sched[s.id][day] !== "off") return false;
+          return requests[s.id]?.[day] !== "off"; // ユーザー指定 off は動かさない
+        });
+
+        for (const s of restingHere) {
+          if (staff.filter(x => sched[x.id][day] === typeId).length >= required) break;
+          // この人が出勤中で余剰のある日を探す
+          const swapDay = DATES.find(d => {
+            if (d === day) return false;
+            if (!isWorking(sched[s.id][d])) return false;
+            if (requests[s.id]?.[d] === "required") return false;
+            const tId = sched[s.id][d];
+            const slotR = ((daySlots[d] || []).find(sl => sl.typeId === tId) || {}).required || 0;
+            return staff.filter(x => sched[x.id][d] === tId).length > slotR;
+          });
+          if (swapDay !== undefined) {
+            const oldType = sched[s.id][swapDay];
+            typeCount[s.id][oldType]--;
+            sched[s.id][swapDay] = "off";
+            sched[s.id][day] = typeId;
+            typeCount[s.id][typeId]++;
+            improved = true;
+          }
+        }
+      });
+    });
+    if (!improved) break;
+  }
 
   // ─ 事後チェック ─
   staff.forEach(s => {
@@ -521,7 +658,10 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}) {
 
 // ─── 事後違反チェック（手動編集後の再計算用）──────────────────
 // generateSchedule と同じ事後チェックロジックをスタンドアロン化
-function computeViolations(sched, staff, types, daySlots, requests, prevWeekWork = {}) {
+function computeViolations(sched, staff, types, daySlots, requests, prevWeekWork = {}, monthlyOverrides = {}) {
+  // 月別上書き条件をマージ
+  staff = staff.map(s => ({ ...s, ...(monthlyOverrides[s.id] || {}) }));
+
   const violations = [];
   const isWorking  = v => v && v !== "off" && v !== "paid";
   const ASSIGN_LIMIT = Math.max(1, staff.length - 2);
@@ -607,27 +747,21 @@ function App() {
   const [tab,          setTab]          = useState("auto");
   const [staff,        setStaff]        = useState(() => loadLS("as_staff",    INIT_STAFF));
   const [types,        setTypes]        = useState(() => loadLS("as_types",    INIT_TYPES));
-  const [daySlots,     setDaySlots]     = useState(() => {
-    const raw = loadLS("as_daySlots", {});
-    // キーが文字列で保存されるので数値に戻す
-    return Object.fromEntries(Object.entries(raw).map(([k, v]) => [Number(k), v]));
-  });
+  const [daySlots,     setDaySlots]     = useState(() => loadLS("as_daySlots", {}));
   const [requests,     setRequests]     = useState(() => loadLS("as_requests", {}));
-  const [selStaffId,   setSelStaffId]   = useState(() => {
-    const s = loadLS("as_staff", INIT_STAFF);
-    return s[0]?.id ?? INIT_STAFF[0].id;
-  });
+  const [selStaffId,   setSelStaffId]   = useState(() => { const s = loadLS("as_staff", INIT_STAFF); return s[0]?.id ?? INIT_STAFF[0].id; });
   // ④ 自動生成結果をタブ移動後も保持するためにApp側で管理
   const [sched,        setSched]        = useState(null);
   const [violations,   setViolations]   = useState([]);
   const [typeCount,    setTypeCount]    = useState({});
   const [prevWeekWork, setPrevWeekWork] = useState(() => {
     const s = loadLS("as_staff", INIT_STAFF);
-    return Object.fromEntries(s.map(st => [st.id, 0]));
+    return Object.fromEntries(s.map(x => [x.id, 0]));
   });
   const [schedYear,       setSchedYear]       = useState(YEAR);
   const [schedMonth,      setSchedMonth]      = useState(MONTH);
   const [savedSchedules,  setSavedSchedules]  = useState(() => loadLS("as_saved_schedules", []));
+  const [staffMonthly,    setStaffMonthly]    = useState(() => loadLS("as_staff_monthly",    {}));
 
   function handleMonthChange(year, month) {
     updateCurrentMonth(year, month);
@@ -672,46 +806,28 @@ function App() {
     setSavedSchedules(prev => prev.filter(s => s.id !== id));
   }
 
-  // 変更のたびに自動保存
   useEffect(() => saveLS("as_staff",           staff),          [staff]);
   useEffect(() => saveLS("as_types",           types),          [types]);
   useEffect(() => saveLS("as_daySlots",        daySlots),       [daySlots]);
   useEffect(() => saveLS("as_requests",        requests),       [requests]);
   useEffect(() => saveLS("as_saved_schedules", savedSchedules), [savedSchedules]);
-
-  function handleReset() {
-    if (!window.confirm("すべてのデータをリセットしますか？この操作は元に戻せません。")) return;
-    ["as_staff","as_types","as_daySlots","as_requests"].forEach(k => localStorage.removeItem(k));
-    setStaff(INIT_STAFF);
-    setTypes(INIT_TYPES);
-    setDaySlots({});
-    setRequests({});
-    setSched(null);
-    setViolations([]);
-    setTypeCount({});
-    setSelStaffId(INIT_STAFF[0].id);
-    setPrevWeekWork(Object.fromEntries(INIT_STAFF.map(s => [s.id, 0])));
-  }
+  useEffect(() => saveLS("as_staff_monthly",   staffMonthly),   [staffMonthly]);
 
   return (
     <div className="min-h-screen bg-gray-50">
+      <style>{`
+        @media print {
+          @page { size: A4 landscape; margin: 7mm; }
+          .no-print { display: none !important; }
+          .print-only { display: block !important; }
+          body { background: white !important; font-family: sans-serif; }
+        }
+        .print-only { display: none; }
+      `}</style>
 
       <header className="bg-blue-700 text-white px-6 py-4 shadow no-print">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-xl font-bold">🗓 オートシフト — プロトタイプ</h1>
-            <p className="text-blue-200 text-sm">{schedYear}年{schedMonth}月 シフト管理</p>
-          </div>
-          <div className="flex items-center gap-3">
-            <span className="text-blue-200 text-xs flex items-center gap-1">
-              💾 データは自動保存されます
-            </span>
-            <button onClick={handleReset}
-              className="text-xs bg-blue-800 hover:bg-blue-900 text-blue-200 px-3 py-1.5 rounded border border-blue-600">
-              🗑 リセット
-            </button>
-          </div>
-        </div>
+        <h1 className="text-xl font-bold">🗓 オートシフト — プロトタイプ</h1>
+        <p className="text-blue-200 text-sm">{schedYear}年{schedMonth}月 シフト管理</p>
       </header>
 
       <nav className="bg-white border-b flex no-print">
@@ -730,9 +846,8 @@ function App() {
       </nav>
 
       <main className="p-6 max-w-6xl mx-auto no-print">
-        {tab === "staff"    && <StaffTab    staff={staff} setStaff={setStaff} />}
         {tab === "slots"    && <SlotsTab    types={types} daySlots={daySlots} setDaySlots={setDaySlots} staff={staff} requests={requests[`${schedYear}-${schedMonth}`]||{}} />}
-        {tab === "requests" && <RequestsTab staff={staff} requests={requests} setRequests={setRequests} selStaffId={selStaffId} setSelStaffId={setSelStaffId} />}
+        {tab === "requests" && <RequestsTab staff={staff} setStaff={setStaff} requests={requests} setRequests={setRequests} selStaffId={selStaffId} setSelStaffId={setSelStaffId} staffMonthly={staffMonthly} setStaffMonthly={setStaffMonthly} />}
         {tab === "auto"     && <AutoGenTab  staff={staff} types={types} setTypes={setTypes} daySlots={daySlots} requests={requests[`${schedYear}-${schedMonth}`]||{}}
                                sched={sched} setSched={setSched}
                                violations={violations} setViolations={setViolations}
@@ -742,7 +857,9 @@ function App() {
                                savedSchedules={savedSchedules}
                                onSaveSchedule={handleSaveSchedule}
                                onLoadSchedule={handleLoadSchedule}
-                               onDeleteSchedule={handleDeleteSchedule} />}
+                               onDeleteSchedule={handleDeleteSchedule}
+                               staffMonthly={staffMonthly}
+                               setStaffMonthly={setStaffMonthly} />}
       </main>
     </div>
   );
@@ -754,13 +871,41 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
                       typeCount, setTypeCount,
                       prevWeekWork, setPrevWeekWork,
                       schedYear, schedMonth, onMonthChange,
-                      savedSchedules, onSaveSchedule, onLoadSchedule, onDeleteSchedule }) {
-  const [editCell,      setEditCell]     = useState(null);
-  const [showPrevInput, setShowPrevInput] = useState(false);
-  const [pdfLoading,    setPdfLoading]   = useState(false);
-  const [showSaveForm,  setShowSaveForm] = useState(false);
-  const [saveName,      setSaveName]     = useState("");
-  const [showSavedList, setShowSavedList] = useState(false);
+                      savedSchedules, onSaveSchedule, onLoadSchedule, onDeleteSchedule,
+                      staffMonthly, setStaffMonthly }) {
+  const [editCell,         setEditCell]        = useState(null);
+  const [showPrevInput,    setShowPrevInput]   = useState(false);
+  const [pdfLoading,       setPdfLoading]      = useState(false);
+  const [showSaveForm,     setShowSaveForm]    = useState(false);
+  const [saveName,         setSaveName]        = useState("");
+  const [showSavedList,    setShowSavedList]   = useState(false);
+  const [showMonthlyCond,  setShowMonthlyCond] = useState(false);
+
+  const mKey = `${schedYear}-${schedMonth}`;
+  const monthlyOverrides = staffMonthly[mKey] || {};
+
+  function setMonthlyField(staffId, field, value) {
+    setStaffMonthly(prev => ({
+      ...prev,
+      [mKey]: {
+        ...(prev[mKey] || {}),
+        [staffId]: {
+          ...(prev[mKey]?.[staffId] || {}),
+          [field]: value === "" ? undefined : Number(value),
+        },
+      },
+    }));
+  }
+
+  function resetMonthlyStaff(staffId) {
+    setStaffMonthly(prev => {
+      const next = { ...prev, [mKey]: { ...(prev[mKey] || {}) } };
+      delete next[mKey][staffId];
+      if (Object.keys(next[mKey]).length === 0) delete next[mKey];
+      return next;
+    });
+  }
+
   // ─ シフト種別管理 state ─
   const [editTypeId,  setEditTypeId]  = useState(null);
   const [typeForm,    setTypeForm]    = useState({});
@@ -801,7 +946,7 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
   }
 
   function handleGenerate() {
-    const result = generateSchedule(staff, types, daySlots, requests, prevWeekWork);
+    const result = generateSchedule(staff, types, daySlots, requests, prevWeekWork, monthlyOverrides);
     setSched(result.sched);
     setViolations(result.violations);
     setTypeCount(result.typeCount);
@@ -812,7 +957,7 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
     const newSched = { ...sched, [staffId]: { ...sched[staffId], [day]: val } };
     setSched(newSched);
     // 手動修正後に違反を再計算 → 解消済みの項目は自動的に消える
-    setViolations(computeViolations(newSched, staff, types, daySlots, requests, prevWeekWork));
+    setViolations(computeViolations(newSched, staff, types, daySlots, requests, prevWeekWork, monthlyOverrides));
     setEditCell(null);
   }
 
@@ -859,6 +1004,102 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
           <span className="ml-auto text-xs text-amber-600 flex items-center gap-1">
             ⚠ 月を変更すると現在のシフトはリセットされます
           </span>
+        )}
+      </div>
+
+      {/* ─ 月別勤務条件 ─ */}
+      <div className="mb-4 bg-white border border-gray-200 rounded-xl overflow-hidden">
+        <button
+          onClick={() => setShowMonthlyCond(v => !v)}
+          className="w-full flex items-center justify-between px-4 py-3 text-sm font-semibold text-gray-700 hover:bg-gray-50 transition-colors">
+          <span>
+            🗓 月別勤務条件（{schedYear}年{schedMonth}月）
+            {Object.keys(monthlyOverrides).length > 0 && (
+              <span className="ml-2 text-xs bg-indigo-100 text-indigo-600 px-2 py-0.5 rounded-full font-bold">
+                {Object.keys(monthlyOverrides).length}名設定中
+              </span>
+            )}
+          </span>
+          <span className="text-gray-400">{showMonthlyCond ? "▲" : "▼"}</span>
+        </button>
+
+        {showMonthlyCond && (
+          <div className="border-t border-gray-100 p-4">
+            <p className="text-xs text-gray-400 mb-3">
+              ※ 未設定の項目はスタッフ設定の値を使用。設定するとこの月のみ上書きされます。
+            </p>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm border-collapse">
+                <thead>
+                  <tr className="bg-gray-50">
+                    <th className="border border-gray-200 px-3 py-2 text-left text-xs font-semibold text-gray-600 min-w-24">氏名</th>
+                    <th className="border border-gray-200 px-3 py-2 text-center text-xs font-semibold text-gray-600 w-28">必須休日数</th>
+                    <th className="border border-gray-200 px-3 py-2 text-center text-xs font-semibold text-gray-600 w-28">最大連勤日数</th>
+                    <th className="border border-gray-200 px-3 py-2 text-center text-xs font-semibold text-gray-600 w-28">週休日数</th>
+                    <th className="border border-gray-200 px-3 py-2 text-center text-xs font-semibold text-gray-600 w-28">最低出勤日数</th>
+                    <th className="border border-gray-200 px-2 py-2 text-center text-xs font-semibold text-gray-600 w-16">リセット</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {staff.map((s, si) => {
+                    const ov = monthlyOverrides[s.id] || {};
+                    const hasOv = !!staffMonthly[mKey]?.[s.id];
+                    const fields = [
+                      { key: "requiredDaysOff", label: "日", globalVal: s.requiredDaysOff ?? 8 },
+                      { key: "maxConsecutive",  label: "日", globalVal: s.maxConsecutive  ?? 3 },
+                      { key: "weeklyDaysOff",   label: "日", globalVal: s.weeklyDaysOff   ?? 2 },
+                      { key: "minWorkDays",     label: "日", globalVal: s.minWorkDays     ?? 0 },
+                    ];
+                    return (
+                      <tr key={s.id} className={si % 2 === 0 ? "bg-white" : "bg-gray-50"}>
+                        <td className="border border-gray-200 px-3 py-2 font-medium text-gray-800 text-xs">
+                          {s.name}
+                          {hasOv && <span className="ml-1 text-indigo-500 text-xs">●</span>}
+                        </td>
+                        {fields.map(f => {
+                          const curVal = ov[f.key] !== undefined ? ov[f.key] : f.globalVal;
+                          const isOverridden = ov[f.key] !== undefined;
+                          return (
+                            <td key={f.key} className="border border-gray-200 px-2 py-1 text-center">
+                              <div className="flex items-center justify-center gap-1">
+                                <input
+                                  type="number" min="0" max="31"
+                                  value={curVal}
+                                  onChange={e => setMonthlyField(s.id, f.key, e.target.value)}
+                                  className={`w-14 text-center text-sm border rounded px-1 py-0.5 focus:outline-none focus:ring-2 focus:ring-indigo-400 ${
+                                    isOverridden ? "border-indigo-400 bg-indigo-50 font-bold text-indigo-700" : "border-gray-300 text-gray-600"
+                                  }`}
+                                />
+                                <span className="text-xs text-gray-400">{f.label}</span>
+                              </div>
+                              {isOverridden && (
+                                <div className="text-xs text-gray-400 mt-0.5">元：{f.globalVal}{f.label}</div>
+                              )}
+                            </td>
+                          );
+                        })}
+                        <td className="border border-gray-200 px-2 py-1 text-center">
+                          {hasOv && (
+                            <button onClick={() => resetMonthlyStaff(s.id)}
+                              className="text-xs text-gray-400 hover:text-red-500 transition-colors" title="この月の上書きを削除">
+                              ↺
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            {Object.keys(monthlyOverrides).length > 0 && (
+              <button
+                onClick={() => setStaffMonthly(prev => { const n = {...prev}; delete n[mKey]; return n; })}
+                className="mt-3 text-xs text-gray-400 hover:text-red-500 transition-colors">
+                🗑 この月の全設定をリセット
+              </button>
+            )}
+          </div>
         )}
       </div>
 
@@ -1091,7 +1332,10 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
                 </span>
               </div>
               <div className="space-y-1 max-h-28 overflow-y-auto">
-                {violations.map((v, i) => (
+                {[...violations].sort((a,b) => {
+                  const order = { critical: 0, error: 1, warning: 2 };
+                  return (order[a.severity] ?? 2) - (order[b.severity] ?? 2);
+                }).map((v, i) => (
                   <div key={i} className={`text-xs px-3 py-1.5 rounded flex items-start gap-2 ${
                     v.severity === "critical" ? "bg-red-200 text-red-900 font-bold border border-red-400"
                     : v.severity === "error"  ? "bg-red-100 text-red-700"
@@ -1111,7 +1355,7 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
           {/* ─ シフト表グリッド ─ */}
           <div className="bg-white rounded-xl shadow overflow-auto mb-4">
             <div className="p-4 border-b flex items-center justify-between">
-              <h3 className="font-bold text-gray-800">2026年3月 シフト表（画面プレビュー）</h3>
+              <h3 className="font-bold text-gray-800">{schedYear}年{schedMonth}月 シフト表（画面プレビュー）</h3>
               <div className="flex items-center gap-3 text-xs flex-wrap">
                 {types.map(t => (
                   <span key={t.id} className="flex items-center gap-1">
@@ -1122,7 +1366,7 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
                 <span className="flex items-center gap-1">
                   <span className="w-3 h-3 rounded-sm inline-block" style={{backgroundColor:PAID_COLOR}} />有給
                 </span>
-                <span className="text-blue-500 ml-1 font-medium">✏️ セルをクリックしてシフト種別を手動変更できます</span>
+                <span className="text-blue-500 font-medium ml-1">✏️ セルをクリックしてシフト種別を手動変更できます</span>
               </div>
             </div>
             <div className="overflow-x-auto">
@@ -1740,7 +1984,7 @@ function SlotsTab({ types, daySlots, setDaySlots, staff, requests }) {
             <div className="flex gap-3 mt-2">
               <button onClick={applyBulk} disabled={!Object.values(dowTpl).some(t=>t.length>0)}
                 className={`flex-1 py-3 rounded-lg font-medium transition-all ${applyDone?"bg-green-50 border-2 border-green-500 text-green-700":"bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40"}`}>
-                {applyDone?"✓ 2026年3月に適用しました！":"✅ 2026年3月に一括適用"}
+                {applyDone?`✓ ${YEAR}年${MONTH}月に適用しました！`:`✅ ${YEAR}年${MONTH}月に一括適用`}
               </button>
               <button onClick={()=>{setCopyDone(true);setTimeout(()=>setCopyDone(false),3000);}}
                 className={`flex-1 py-3 rounded-lg font-medium border-2 transition-all ${copyDone?"bg-green-50 border-green-500 text-green-700":"bg-white border-blue-300 text-blue-700 hover:bg-blue-50"}`}>
@@ -1826,7 +2070,6 @@ function SlotsTab({ types, daySlots, setDaySlots, staff, requests }) {
           </div>
         )}
       </div>
-
     </div>
   );
 }
@@ -1885,11 +2128,10 @@ function TemplateSection({ title, emoji, colorKey, dayCount, template, setTempla
 // ─── ③ RequestsTab ───────────────────────────────────────────
 // サイクル: 出勤 → 休み希望 → できれば休み → 有給 → 出勤
 const REQ_OPTS = [
-  { value: "",         label: "出勤",         bg: "bg-white",      text: "text-gray-300",   border: "border-gray-200"   },
-  { value: "off",      label: "休み希望",     bg: "bg-red-100",    text: "text-red-700",    border: "border-red-300"    },
-  { value: "prefer",   label: "できれば休み", bg: "bg-yellow-100", text: "text-yellow-700", border: "border-yellow-300" },
-  { value: "paid",     label: "有給",         bg: "bg-purple-100", text: "text-purple-700", border: "border-purple-300" },
-  { value: "required", label: "必出",         bg: "bg-green-100",  text: "text-green-700",  border: "border-green-300"  },
+  { value: "",         label: "出勤",     bg: "bg-white",      text: "text-gray-300",   border: "border-gray-200"   },
+  { value: "off",      label: "休み希望", bg: "bg-red-100",    text: "text-red-700",    border: "border-red-300"    },
+  { value: "paid",     label: "有給",     bg: "bg-purple-100", text: "text-purple-700", border: "border-purple-300" },
+  { value: "required", label: "必出",     bg: "bg-green-100",  text: "text-green-700",  border: "border-green-300"  },
 ];
 
 // 向こう半年の月リストを生成（YEAR/MONTHから6ヶ月）
@@ -1901,11 +2143,21 @@ function getSixMonths() {
   });
 }
 
-function RequestsTab({ staff, requests, setRequests, selStaffId, setSelStaffId }) {
-  const [reqYear,  setReqYear]  = useState(YEAR);
-  const [reqMonth, setReqMonth] = useState(MONTH);
+function RequestsTab({ staff, setStaff, requests, setRequests, selStaffId, setSelStaffId, staffMonthly, setStaffMonthly }) {
+  const [reqYear,       setReqYear]       = useState(YEAR);
+  const [reqMonth,      setReqMonth]      = useState(MONTH);
+  const [showStaffMgmt, setShowStaffMgmt] = useState(false);
+  const [showCondEdit,  setShowCondEdit]  = useState(false);
+  // allMonths: 過去の入力済み月 ＋ 現在から6ヶ月先
+  const futureMonths = getSixMonths();
+  const curYM = YEAR * 12 + MONTH;
+  const pastMonths = Object.keys(requests || {})
+    .map(key => { const [y,m] = key.split('-').map(Number); return {year:y, month:m, isPast:true}; })
+    .filter(({year,month}) => year*12+month < curYM &&
+      staff.some(s => Object.keys(requests[`${year}-${month}`]?.[s.id]||{}).length > 0))
+    .sort((a,b) => (a.year*12+a.month) - (b.year*12+b.month));
+  const allMonths = [...pastMonths, ...futureMonths.map(m => ({...m, isPast:false}))];
 
-  const sixMonths  = getSixMonths();
   const mKey       = `${reqYear}-${reqMonth}`;
   const mDays      = new Date(reqYear, reqMonth, 0).getDate();
   const mDates     = Array.from({length:mDays},(_,i)=>i+1);
@@ -1915,7 +2167,7 @@ function RequestsTab({ staff, requests, setRequests, selStaffId, setSelStaffId }
   const mDow       = d => new Date(reqYear, reqMonth-1, d).getDay();
   const mDayLabel  = d => ["日","月","火","水","木","金","土"][mDow(d)];
 
-  const mIdx = sixMonths.findIndex(m=>m.year===reqYear&&m.month===reqMonth);
+  const mIdx = allMonths.findIndex(m=>m.year===reqYear&&m.month===reqMonth);
 
   function getReq(sid,day) { return requests[mKey]?.[sid]?.[day]||""; }
   function cycleReq(sid,day) {
@@ -1926,41 +2178,99 @@ function RequestsTab({ staff, requests, setRequests, selStaffId, setSelStaffId }
 
   const sel         = staff.find(s=>s.id===selStaffId);
   const offCnt      = mDates.filter(d=>getReq(selStaffId,d)==="off").length;
-  const preferCnt   = mDates.filter(d=>getReq(selStaffId,d)==="prefer").length;
   const paidCnt     = mDates.filter(d=>getReq(selStaffId,d)==="paid").length;
   const requiredCnt = mDates.filter(d=>getReq(selStaffId,d)==="required").length;
+
+  // ── 月別勤務条件 ────────────────────────────────────────────
+  const monthOv    = (staffMonthly?.[mKey]?.[selStaffId]) || {};
+  const effCond    = sel ? {
+    maxConsecutive:  monthOv.maxConsecutive  !== undefined ? monthOv.maxConsecutive  : (sel.maxConsecutive  ?? 3),
+    weeklyDaysOff:   monthOv.weeklyDaysOff   !== undefined ? monthOv.weeklyDaysOff   : (sel.weeklyDaysOff   ?? 2),
+    requiredDaysOff: monthOv.requiredDaysOff !== undefined ? monthOv.requiredDaysOff : (sel.requiredDaysOff ?? 8),
+    minWorkDays:     monthOv.minWorkDays     !== undefined ? monthOv.minWorkDays     : (sel.minWorkDays     ?? 0),
+  } : null;
+  const hasMonthOv = sel ? Object.keys(monthOv).length > 0 : false;
+
+  function setMonthCond(field, value) {
+    if (!setStaffMonthly) return;
+    setStaffMonthly(prev => ({
+      ...prev,
+      [mKey]: {
+        ...(prev[mKey] || {}),
+        [selStaffId]: {
+          ...(prev[mKey]?.[selStaffId] || {}),
+          [field]: Number(value),
+        },
+      },
+    }));
+  }
+  function resetMonthCond() {
+    if (!setStaffMonthly) return;
+    setStaffMonthly(prev => {
+      const next = { ...prev, [mKey]: { ...(prev[mKey] || {}) } };
+      delete next[mKey][selStaffId];
+      if (Object.keys(next[mKey]).length === 0) delete next[mKey];
+      return next;
+    });
+  }
 
   const cells=Array(mFirstDow).fill(null).concat(mDates);
   const weeks=[]; for(let i=0;i<cells.length;i+=7) weeks.push(cells.slice(i,i+7));
 
   return (
     <div>
+      {/* ── スタッフ管理（折りたたみ） ── */}
+      <div className="mb-4 bg-white border border-gray-200 rounded-xl overflow-hidden">
+        <button
+          onClick={() => setShowStaffMgmt(v => !v)}
+          className="w-full flex items-center justify-between px-4 py-3 text-sm font-semibold text-gray-700 hover:bg-gray-50 transition-colors">
+          <span>
+            👥 スタッフ管理・基本勤務条件
+            <span className="ml-2 text-xs font-normal text-gray-400">{staff.length}名登録中</span>
+          </span>
+          <span className="text-gray-400 text-xs">{showStaffMgmt ? "▲ 閉じる" : "▼ 開く"}</span>
+        </button>
+        {showStaffMgmt && (
+          <div className="border-t border-gray-100 p-4">
+            <StaffTab staff={staff} setStaff={setStaff} />
+          </div>
+        )}
+      </div>
+
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-lg font-bold text-gray-800">スタッフ別 休み希望・有給入力</h2>
+        <h2 className="text-lg font-bold text-gray-800">休み希望・有給入力</h2>
         {/* 月ナビゲーション */}
         <div className="flex items-center gap-2">
-          <button onClick={()=>{ const prev=sixMonths[mIdx-1]; if(prev){setReqYear(prev.year);setReqMonth(prev.month);} }}
+          <button onClick={()=>{ const prev=allMonths[mIdx-1]; if(prev){setReqYear(prev.year);setReqMonth(prev.month);} }}
             disabled={mIdx<=0} className="px-3 py-1.5 rounded border text-sm font-medium disabled:opacity-30 hover:bg-gray-100">◀</button>
           <div className="text-center min-w-24">
             <div className="font-bold text-gray-800">{reqYear}年{reqMonth}月</div>
             {reqYear===YEAR&&reqMonth===MONTH&&<div className="text-xs text-blue-500 font-medium">自動生成対象月</div>}
+            {mIdx>=0&&allMonths[mIdx]?.isPast&&<div className="text-xs text-gray-400 font-medium">過去データ</div>}
           </div>
-          <button onClick={()=>{ const next=sixMonths[mIdx+1]; if(next){setReqYear(next.year);setReqMonth(next.month);} }}
-            disabled={mIdx>=sixMonths.length-1} className="px-3 py-1.5 rounded border text-sm font-medium disabled:opacity-30 hover:bg-gray-100">▶</button>
+          <button onClick={()=>{ const next=allMonths[mIdx+1]; if(next){setReqYear(next.year);setReqMonth(next.month);} }}
+            disabled={mIdx>=allMonths.length-1} className="px-3 py-1.5 rounded border text-sm font-medium disabled:opacity-30 hover:bg-gray-100">▶</button>
         </div>
       </div>
 
-      {/* 月選択タブ */}
-      <div className="flex gap-1 mb-4 overflow-x-auto">
-        {sixMonths.map((m,i)=>{
+      {/* 月選択タブ（過去入力済み月 ＋ 今後6ヶ月） */}
+      <div className="flex gap-1 mb-4 overflow-x-auto pb-1">
+        {allMonths.map((m,i)=>{
           const mk=`${m.year}-${m.month}`;
           const hasSome=staff.some(s=>Object.keys(requests[mk]?.[s.id]||{}).length>0);
           const isCur=m.year===reqYear&&m.month===reqMonth;
+          const isPast=m.isPast;
           return (
-            <button key={i} onClick={()=>{setReqYear(m.year);setReqMonth(m.month);}}
-              className={`px-3 py-1.5 rounded-full text-sm font-medium whitespace-nowrap transition-all ${isCur?"bg-blue-600 text-white shadow":"bg-white border border-gray-200 text-gray-600 hover:border-blue-400"}`}>
+            <button key={`${m.year}-${m.month}`} onClick={()=>{setReqYear(m.year);setReqMonth(m.month);}}
+              className={`px-3 py-1.5 rounded-full text-sm font-medium whitespace-nowrap transition-all ${
+                isCur
+                  ? (isPast ? "bg-gray-600 text-white shadow" : "bg-blue-600 text-white shadow")
+                  : isPast
+                    ? "bg-gray-100 border border-gray-300 text-gray-500 hover:border-gray-500"
+                    : "bg-white border border-gray-200 text-gray-600 hover:border-blue-400"
+              }`}>
               {m.year !== YEAR ? `${m.year}/` : ""}{m.month}月
-              {hasSome&&<span className={`ml-1 text-xs ${isCur?"opacity-70":"text-blue-500"}`}>✓</span>}
+              {hasSome&&<span className={`ml-1 text-xs ${isCur?"opacity-70":isPast?"text-gray-500":"text-blue-500"}`}>✓</span>}
             </button>
           );
         })}
@@ -2033,10 +2343,6 @@ function RequestsTab({ staff, requests, setRequests, selStaffId, setSelStaffId }
                   <span className="font-bold text-red-600">{offCnt}日</span>
                 </div>
                 <div className="flex justify-between items-center">
-                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-yellow-400 inline-block"/>できれば休み</span>
-                  <span className="font-bold text-yellow-600">{preferCnt}日</span>
-                </div>
-                <div className="flex justify-between items-center">
                   <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full inline-block" style={{backgroundColor:PAID_COLOR}}/>有給</span>
                   <span className="font-bold" style={{color:PAID_COLOR}}>{paidCnt}日</span>
                 </div>
@@ -2046,27 +2352,110 @@ function RequestsTab({ staff, requests, setRequests, selStaffId, setSelStaffId }
                     <span className="font-bold text-green-700">{requiredCnt}日</span>
                   </div>
                 )}
-                <div className="flex justify-between border-t pt-2 items-center">
-                  <span className="text-gray-600">出勤日（最大）</span>
-                  <span className="font-bold">{mDays - offCnt - paidCnt}日</span>
+                <div className="border-t pt-2 space-y-1.5">
+                  <div className="flex justify-between items-center">
+                    <span className="text-gray-600">出勤日（最大）</span>
+                    <span className="font-bold">{mDays - offCnt - paidCnt}日</span>
+                  </div>
+                  {effCond && (
+                    <div className="flex justify-between items-center">
+                      <span className={`text-xs font-medium ${offCnt >= effCond.requiredDaysOff ? "text-green-600" : "text-amber-600"}`}>
+                        必須休日 {effCond.requiredDaysOff}日
+                        {hasMonthOv && monthOv.requiredDaysOff !== undefined &&
+                          <span className="ml-1 text-indigo-400 font-normal">（月別）</span>}
+                      </span>
+                      <span className={`text-xs font-bold ${offCnt >= effCond.requiredDaysOff ? "text-green-600" : "text-amber-600"}`}>
+                        {offCnt >= effCond.requiredDaysOff
+                          ? `✓ ${offCnt}/${effCond.requiredDaysOff}日`
+                          : `${offCnt}/${effCond.requiredDaysOff}日 残${effCond.requiredDaysOff - offCnt}日`}
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
             <div className="bg-white rounded-lg shadow p-4">
-              <h3 className="font-semibold text-gray-700 mb-3">勤務条件（参照）</h3>
-              <div className="space-y-2 text-sm text-gray-600">
-                {sel.role&&(()=>{const ro=ROLE_OPTIONS.find(r=>r.value===sel.role);return(
-                  <div className="flex justify-between items-center">
-                    <span>役職</span>
-                    <span className="font-bold text-white text-xs px-2 py-0.5 rounded-full" style={{backgroundColor:ro?.color}}>{sel.role}</span>
-                  </div>
-                );})()}
-                <div className="flex justify-between"><span>最大連勤</span><span className="font-bold text-red-600">{sel.maxConsecutive}日</span></div>
-                <div className="flex justify-between"><span>週の休日数（土〜金）</span><span className="font-bold">{sel.weeklyDaysOff}日</span></div>
-                <div className="flex justify-between"><span className="text-amber-700 font-medium">月の必須休日数</span><span className="font-bold text-amber-700">{sel.requiredDaysOff}日</span></div>
-                {(sel.minWorkDays||0)>0&&<div className="flex justify-between"><span className="text-emerald-700 font-medium">月の必須勤務日数</span><span className="font-bold text-emerald-700">{sel.minWorkDays}日</span></div>}
-                {sel.notes&&<div className="mt-2 p-2 bg-yellow-50 rounded text-xs text-yellow-700">📝 {sel.notes}</div>}
+              {/* ヘッダー */}
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="font-semibold text-gray-700 text-sm">
+                  勤務条件（{reqMonth}月）
+                  {hasMonthOv && <span className="ml-1.5 text-xs bg-indigo-100 text-indigo-600 px-1.5 py-0.5 rounded-full font-bold">月別設定あり</span>}
+                </h3>
+                <div className="flex items-center gap-1.5">
+                  {hasMonthOv && showCondEdit && (
+                    <button onClick={resetMonthCond}
+                      className="text-xs text-gray-400 hover:text-red-500 transition-colors" title="リセット">↺</button>
+                  )}
+                  <button
+                    onClick={() => setShowCondEdit(v => !v)}
+                    className={`text-xs px-2 py-0.5 rounded border transition-colors ${
+                      showCondEdit ? "bg-indigo-600 text-white border-indigo-600" : "border-gray-300 text-gray-500 hover:border-indigo-400 hover:text-indigo-600"
+                    }`}>
+                    {showCondEdit ? "✓ 完了" : "⚙ 編集"}
+                  </button>
+                </div>
               </div>
+
+              {/* 役職 */}
+              {sel.role && (()=>{const ro=ROLE_OPTIONS.find(r=>r.value===sel.role);return(
+                <div className="flex justify-between items-center mb-2">
+                  <span className="text-xs text-gray-500">役職</span>
+                  <span className="font-bold text-white text-xs px-2 py-0.5 rounded-full" style={{backgroundColor:ro?.color}}>{sel.role}</span>
+                </div>
+              );})()}
+
+              {/* 通常表示：コンパクトグリッド */}
+              {!showCondEdit && (
+                <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
+                  {[
+                    { field:"requiredDaysOff", label:"必須休日",   globalVal:sel.requiredDaysOff??8 },
+                    { field:"maxConsecutive",  label:"最大連勤",   globalVal:sel.maxConsecutive??3  },
+                    { field:"weeklyDaysOff",   label:"週の休日",   globalVal:sel.weeklyDaysOff??2   },
+                    { field:"minWorkDays",     label:"必須勤務日", globalVal:sel.minWorkDays??0     },
+                  ].map(({ field, label, globalVal }) => {
+                    const isOv  = monthOv[field] !== undefined;
+                    const val   = isOv ? monthOv[field] : globalVal;
+                    return (
+                      <div key={field} className="flex justify-between items-center">
+                        <span className={isOv ? "text-indigo-600 font-medium" : "text-gray-500"}>{label}</span>
+                        <span className={`font-bold ${isOv ? "text-indigo-700" : "text-gray-700"}`}>{val}日</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* 編集表示：+/− ボタン */}
+              {showCondEdit && (
+                <div className="space-y-2">
+                  {[
+                    { field:"requiredDaysOff", label:"月の必須休日数",    globalVal:sel.requiredDaysOff??8, max:20 },
+                    { field:"maxConsecutive",  label:"最大連勤日数",       globalVal:sel.maxConsecutive??3,  max:10 },
+                    { field:"weeklyDaysOff",   label:"週の休日（土〜金）", globalVal:sel.weeklyDaysOff??2,   max:6  },
+                    { field:"minWorkDays",     label:"月の必須勤務日数",   globalVal:sel.minWorkDays??0,     max:31 },
+                  ].map(({ field, label, globalVal, max }) => {
+                    const isOv   = monthOv[field] !== undefined;
+                    const effVal = isOv ? monthOv[field] : globalVal;
+                    return (
+                      <div key={field}>
+                        <div className="flex items-center justify-between">
+                          <span className={`text-xs ${isOv ? "font-semibold text-indigo-600" : "text-gray-600"}`}>{label}</span>
+                          <div className="flex items-center gap-0.5">
+                            <button onClick={() => setMonthCond(field, Math.max(0, effVal - 1))}
+                              className="w-5 h-5 bg-gray-100 rounded-full text-xs font-bold hover:bg-gray-200 flex items-center justify-center">−</button>
+                            <span className={`w-9 text-center text-sm font-bold ${isOv ? "text-indigo-700" : "text-gray-700"}`}>{effVal}日</span>
+                            <button onClick={() => setMonthCond(field, Math.min(max, effVal + 1))}
+                              className="w-5 h-5 bg-gray-100 rounded-full text-xs font-bold hover:bg-gray-200 flex items-center justify-center">＋</button>
+                          </div>
+                        </div>
+                        {isOv && <div className="text-right text-xs text-gray-400 -mt-0.5">基本：{globalVal}日</div>}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {sel.notes && <div className="mt-2 p-2 bg-yellow-50 rounded text-xs text-yellow-700">📝 {sel.notes}</div>}
             </div>
             <div className="bg-white rounded-lg shadow p-4">
               <h3 className="font-semibold text-gray-700 mb-3">🚨 希望が集中している日</h3>
@@ -2091,9 +2480,7 @@ function RequestsTab({ staff, requests, setRequests, selStaffId, setSelStaffId }
   );
 }
 
-
-const root = ReactDOM.createRoot(document.getElementById('root'));
-root.render(<App />);
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
   </script>
 </body>
 </html>
