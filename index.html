@@ -596,6 +596,56 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}, m
     if (!improved) break;
   }
 
+  // ── Phase 5.5：必須勤務日数の修復パス ──────────────────────────────────────
+  // Phase 1.5 が連勤・週休違反を直すために余分な休日を追加した結果、
+  // actualWork < minWorkDays になる場合を救済する
+  staff.forEach(s => {
+    if ((s.minWorkDays || 0) === 0) return;
+    const actualWork = DATES.filter(d => isWorking(sched[s.id][d])).length;
+    let deficit = s.minWorkDays - actualWork;
+    if (deficit <= 0) return;
+
+    // ユーザー指定 off/paid 以外の休日を、需要の高い順に列挙
+    const candidates = DATES.filter(d => {
+      if (sched[s.id][d] !== "off") return false;      // 出勤中・有給は対象外
+      if (requests[s.id]?.[d] === "off") return false; // ユーザー指定 off は不可
+      return true;
+    }).sort((a, b) => dayDemand(b) - dayDemand(a));
+
+    for (const d of candidates) {
+      if (deficit <= 0) break;
+      // 連勤チェック：この日を出勤にしたとき maxConsecutive を超えないか
+      let streak = 0;
+      for (let dd = d - 1; dd >= 1 && isWorking(sched[s.id][dd]); dd--) streak++;
+      for (let dd = d + 1; dd <= DAYS_IN_MONTH && isWorking(sched[s.id][dd]); dd++) streak++;
+      streak++; // d 自身を出勤とした場合
+      if (streak > s.maxConsecutive) continue; // 連勤超過になるのでスキップ
+
+      // シフト種別を割り当て（不足スロット優先 → 均等化）
+      const slots2 = daySlots[d] || [];
+      let assignedType = null;
+      if (slots2.length > 0) {
+        const bestSlot = [...slots2].sort((a, b) => {
+          const aGap = a.required - staff.filter(x => sched[x.id][d] === a.typeId).length;
+          const bGap = b.required - staff.filter(x => sched[x.id][d] === b.typeId).length;
+          if (aGap !== bGap) return bGap - aGap;
+          return (typeCount[s.id][a.typeId] || 0) - (typeCount[s.id][b.typeId] || 0);
+        })[0];
+        assignedType = bestSlot.typeId;
+      } else if (types.length > 0) {
+        const best = types.reduce((a, b) =>
+          (typeCount[s.id][a.id] || 0) <= (typeCount[s.id][b.id] || 0) ? a : b
+        );
+        assignedType = best.id;
+      }
+      if (assignedType !== null) {
+        sched[s.id][d] = assignedType;
+        typeCount[s.id][assignedType] = (typeCount[s.id][assignedType] || 0) + 1;
+        deficit--;
+      }
+    }
+  });
+
   // ── 最終スロット充足チェック（Phase 5 修復完了後の確定状態で検証）────────────
   // Phase 3 では記録せず、すべての修復パスが終わった後に初めてチェックすることで
   // 「修復で解消済みなのに違反が残る」偽陽性を防ぐ
@@ -1484,14 +1534,9 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
                           </span>
                         )}
                       </td>
-                      {DATES.map(day => {
-                        const dow = getDow(day);
-                        const isH = isHoliday(day);
-                        return (
+                      {DATES.map(day => (
                           <td key={day} className="border border-gray-200 p-0"
-                            style={{background: row===0
-                              ? (dow===0||isH ? "#fef3c7" : dow===6 ? "#fef9c3" : "#fefce8")
-                              : (dow===0||isH ? "#fde68a" : dow===6 ? "#fef3c7" : "#fef9c3"),
+                            style={{background: row===0 ? "#fefce8" : "#fef9c3",
                               height:"60px"}}>
                             <textarea
                               value={curMemos[`${day}-${row}`] || ""}
@@ -1503,14 +1548,13 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
                                 border:"none", background:"transparent",
                                 padding:"2px 3px", outline:"none",
                                 fontFamily:"sans-serif",
-                                writingMode:"vertical-lr",
+                                writingMode:"vertical-rl",
                                 textOrientation:"upright",
                                 overflowY:"hidden",
                               }}
                             />
                           </td>
-                        );
-                      })}
+                      ))}
                       <td className="border border-gray-200"
                         style={{background: row===0 ? "#fef9c3" : "#fde68a"}} />
                     </tr>
@@ -1731,7 +1775,7 @@ function PrintArea({ sched, staff, types, daySlots, violations, memos, memoLabel
                     fontSize:"7px",color:"#374151",
                     background: row===0 ? "#fefce8" : "#fef9c3",
                     height:"28px", width:"8px",
-                    writingMode:"vertical-lr", textOrientation:"upright",
+                    writingMode:"vertical-rl", textOrientation:"upright",
                     overflow:"hidden", whiteSpace:"nowrap",
                     verticalAlign:"top", textAlign:"left"}}>
                     {val}
