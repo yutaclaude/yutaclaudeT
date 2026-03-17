@@ -496,15 +496,7 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}, m
         typeCount[s.id][typeId]++;
       });
 
-      const totalAssigned = alreadyOnType + Math.min(pool.length, stillNeeded);
-      if (totalAssigned < required) {
-        const typeName = types.find(t => t.id === typeId)?.name || typeId;
-        violations.push({
-          day, typeId,
-          severity: totalAssigned < ASSIGN_LIMIT ? "critical" : "error",
-          message: `${MONTH}/${day}（${getDayLabel(day)}）${typeName}：${required}名必要 → ${totalAssigned}名`,
-        });
-      }
+      // ※ スロット充足違反は Phase 5 修復後の最終状態でのみ記録する（Phase 3 では記録しない）
     });
 
     // この日の残り null スタッフ（出勤予定だがスロット割り当てなし）→ 最も不足しているスロットに割り当て
@@ -603,6 +595,24 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}, m
     });
     if (!improved) break;
   }
+
+  // ── 最終スロット充足チェック（Phase 5 修復完了後の確定状態で検証）────────────
+  // Phase 3 では記録せず、すべての修復パスが終わった後に初めてチェックすることで
+  // 「修復で解消済みなのに違反が残る」偽陽性を防ぐ
+  DATES.forEach(day => {
+    (daySlots[day] || []).forEach(({ typeId, required }) => {
+      if (required <= 0) return;
+      const assigned = staff.filter(s => sched[s.id][day] === typeId).length;
+      if (assigned < required) {
+        const typeName = types.find(t => t.id === typeId)?.name || typeId;
+        violations.push({
+          day, typeId,
+          severity: assigned < ASSIGN_LIMIT ? "critical" : "error",
+          message: `${MONTH}/${day}（${getDayLabel(day)}）${typeName}：${required}名必要 → ${assigned}名`,
+        });
+      }
+    });
+  });
 
   // ─ 事後チェック ─
   staff.forEach(s => {
@@ -770,6 +780,8 @@ function App() {
   const [schedMonth,      setSchedMonth]      = useState(MONTH);
   const [savedSchedules,  setSavedSchedules]  = useState(() => loadLS("as_saved_schedules", []));
   const [staffMonthly,    setStaffMonthly]    = useState(() => loadLS("as_staff_monthly",    {}));
+  const [memos,           setMemos]           = useState(() => loadLS("as_memos",            {}));
+  const [memoLabels,      setMemoLabels]      = useState(() => loadLS("as_memo_labels",      ["メモ１", "メモ２"]));
 
   function handleMonthChange(year, month) {
     updateCurrentMonth(year, month);
@@ -820,6 +832,8 @@ function App() {
   useEffect(() => saveLS("as_requests",        requests),       [requests]);
   useEffect(() => saveLS("as_saved_schedules", savedSchedules), [savedSchedules]);
   useEffect(() => saveLS("as_staff_monthly",   staffMonthly),   [staffMonthly]);
+  useEffect(() => saveLS("as_memos",           memos),          [memos]);
+  useEffect(() => saveLS("as_memo_labels",     memoLabels),     [memoLabels]);
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -868,6 +882,8 @@ function App() {
                                onDeleteSchedule={handleDeleteSchedule}
                                staffMonthly={staffMonthly}
                                setStaffMonthly={setStaffMonthly}
+                               memos={memos} setMemos={setMemos}
+                               memoLabels={memoLabels} setMemoLabels={setMemoLabels}
                                setTab={setTab} />}
       </main>
     </div>
@@ -881,7 +897,8 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
                       prevWeekWork, setPrevWeekWork,
                       schedYear, schedMonth, onMonthChange,
                       savedSchedules, onSaveSchedule, onLoadSchedule, onDeleteSchedule,
-                      staffMonthly, setStaffMonthly, setTab }) {
+                      staffMonthly, setStaffMonthly, memos, setMemos,
+                      memoLabels, setMemoLabels, setTab }) {
   const [editCell,         setEditCell]        = useState(null);
   const [showPrevInput,    setShowPrevInput]   = useState(false);
   const [pdfLoading,       setPdfLoading]      = useState(false);
@@ -889,11 +906,17 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
   const [saveName,         setSaveName]        = useState("");
   const [showSavedList,    setShowSavedList]   = useState(false);
   const [showMonthlyCond,  setShowMonthlyCond] = useState(false);
+  const [editMemoLabel,    setEditMemoLabel]   = useState(null); // 編集中のメモラベル行インデックス
 
   const mKey = `${schedYear}-${schedMonth}`;
   const monthlyOverrides = staffMonthly[mKey] || {};
   // 選択月のシフト枠スライス（generateSchedule / computeViolations に渡す）
   const curDaySlots = daySlots[mKey] || {};
+  // メモ（日ごと × 2行）
+  const curMemos = memos[mKey] || {};
+  function setMemoVal(day, row, val) {
+    setMemos(p => ({ ...p, [mKey]: { ...(p[mKey] || {}), [`${day}-${row}`]: val } }));
+  }
 
   function setMonthlyField(staffId, field, value) {
     setStaffMonthly(prev => ({
@@ -1434,6 +1457,64 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
                       <td className="border border-gray-200" />
                     </tr>
                   ))}
+
+                  {/* メモ行（2行） */}
+                  {[0, 1].map(row => (
+                    <tr key={`memo-${row}`}>
+                      <td className="border border-gray-200 px-1 py-0 text-xs font-semibold sticky left-0 z-10"
+                        style={{background: row===0 ? "#fef9c3" : "#fde68a", color:"#92400e", minWidth:"90px", cursor:"pointer"}}
+                        title="クリックでラベルを編集">
+                        {editMemoLabel === row ? (
+                          <input
+                            autoFocus
+                            value={memoLabels[row]}
+                            onChange={e => {
+                              const next = [...memoLabels];
+                              next[row] = e.target.value;
+                              setMemoLabels(next);
+                            }}
+                            onBlur={() => setEditMemoLabel(null)}
+                            onKeyDown={e => { if(e.key==="Enter"||e.key==="Escape") setEditMemoLabel(null); }}
+                            style={{width:"80px",fontSize:"11px",padding:"1px 3px",
+                              border:"1px solid #92400e",borderRadius:"3px",background:"#fffbeb"}}
+                          />
+                        ) : (
+                          <span onClick={() => setEditMemoLabel(row)}>
+                            ✏️ {memoLabels[row] || `メモ${row+1}`}
+                          </span>
+                        )}
+                      </td>
+                      {DATES.map(day => {
+                        const dow = getDow(day);
+                        const isH = isHoliday(day);
+                        return (
+                          <td key={day} className="border border-gray-200 p-0"
+                            style={{background: row===0
+                              ? (dow===0||isH ? "#fef3c7" : dow===6 ? "#fef9c3" : "#fefce8")
+                              : (dow===0||isH ? "#fde68a" : dow===6 ? "#fef3c7" : "#fef9c3"),
+                              height:"60px"}}>
+                            <textarea
+                              value={curMemos[`${day}-${row}`] || ""}
+                              onChange={e => setMemoVal(day, row, e.target.value)}
+                              maxLength={7}
+                              style={{
+                                display:"block", width:"100%", height:"60px",
+                                fontSize:"9px", lineHeight:"1.2", resize:"none",
+                                border:"none", background:"transparent",
+                                padding:"2px 3px", outline:"none",
+                                fontFamily:"sans-serif",
+                                writingMode:"vertical-lr",
+                                textOrientation:"upright",
+                                overflowY:"hidden",
+                              }}
+                            />
+                          </td>
+                        );
+                      })}
+                      <td className="border border-gray-200"
+                        style={{background: row===0 ? "#fef9c3" : "#fde68a"}} />
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
@@ -1511,13 +1592,13 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
       )}
 
       {/* ─ 印刷専用エリア ─ */}
-      {sched && <PrintArea sched={sched} staff={staff} types={types} daySlots={curDaySlots} violations={violations} />}
+      {sched && <PrintArea sched={sched} staff={staff} types={types} daySlots={curDaySlots} violations={violations} memos={curMemos} memoLabels={memoLabels} />}
     </div>
   );
 }
 
 // ─── 印刷専用（A4横） ─────────────────────────────────────────
-function PrintArea({ sched, staff, types, daySlots, violations }) {
+function PrintArea({ sched, staff, types, daySlots, violations, memos, memoLabels }) {
   const isWorking = v => v && v !== "off" && v !== "paid";
   const workCount = sid => DATES.filter(d => isWorking(sched[sid]?.[d])).length;
   const violStaff = new Set(violations.filter(v=>v.staffId&&v.day).map(v=>`${v.staffId}-${v.day}`));
@@ -1633,6 +1714,31 @@ function PrintArea({ sched, staff, types, daySlots, violations }) {
                 </td>;
               })}
               <td style={{border:"1px solid #ddd"}} />
+            </tr>
+          ))}
+
+          {/* メモ行（2行） */}
+          {[0, 1].map(row => (
+            <tr key={`memo-${row}`} style={{background: row===0 ? "#fefce8" : "#fef9c3"}}>
+              <td style={{border:"1px solid #ccc",padding:"2px 3px",fontWeight:"600",
+                fontSize:"7px",color:"#92400e"}}>
+                {(memoLabels && memoLabels[row]) || `メモ${row+1}`}
+              </td>
+              {DATES.map(day => {
+                const val = ((memos || {})[`${day}-${row}`] || "").slice(0, 7);
+                return (
+                  <td key={day} style={{border:"1px solid #ddd",padding:"1px 1px",
+                    fontSize:"7px",color:"#374151",
+                    background: row===0 ? "#fefce8" : "#fef9c3",
+                    height:"28px", width:"8px",
+                    writingMode:"vertical-lr", textOrientation:"upright",
+                    overflow:"hidden", whiteSpace:"nowrap",
+                    verticalAlign:"top", textAlign:"left"}}>
+                    {val}
+                  </td>
+                );
+              })}
+              <td style={{border:"1px solid #ddd",background: row===0 ? "#fefce8" : "#fef9c3"}} />
             </tr>
           ))}
         </tbody>
