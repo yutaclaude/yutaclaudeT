@@ -1029,6 +1029,19 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
     setSched(newSched);
     // 手動修正後に違反を再計算 → 解消済みの項目は自動的に消える
     setViolations(computeViolations(newSched, staff, types, curDaySlots, requests, prevWeekWork, monthlyOverrides));
+    // typeCount を newSched から再集計（バランス表に即時反映）
+    const newTypeCount = {};
+    staff.forEach(s => {
+      newTypeCount[s.id] = {};
+      types.forEach(t => { newTypeCount[s.id][t.id] = 0; });
+      DATES.forEach(d => {
+        const v = newSched[s.id]?.[d];
+        if (v && v !== "off" && v !== "paid" && newTypeCount[s.id][v] !== undefined) {
+          newTypeCount[s.id][v]++;
+        }
+      });
+    });
+    setTypeCount(newTypeCount);
     setEditCell(null);
   }
 
