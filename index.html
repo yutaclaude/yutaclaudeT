@@ -1107,6 +1107,16 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
       row.push(String(workDays));
       rows.push(row);
     });
+    // 空行
+    rows.push(Array(header.length).fill(""));
+    // メモ行（2行）
+    [0, 1].forEach(r => {
+      const label = (memoLabels && memoLabels[r]) || `メモ${r + 1}`;
+      const row   = [label];
+      DATES.forEach(d => row.push((curMemos[`${d}-${r}`] || "")));
+      row.push(""); // 出勤計列は空
+      rows.push(row);
+    });
     // BOM 付き UTF-8 で Excel でも文字化けしない
     const csv  = "\uFEFF" + rows.map(r => r.map(c => `"${String(c).replace(/"/g,'""')}"`).join(",")).join("\r\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
