@@ -13,7 +13,7 @@
 <body>
   <div id="root"></div>
   <script type="text/babel">
-    const { useState, useEffect } = React;
+    const { useState, useEffect, useRef } = React;
 
     // ─── localStorage ユーティリティ ──────────────────────────
     function loadLS(key, def) {
@@ -833,6 +833,58 @@ function App() {
   const [memos,           setMemos]           = useState(() => loadLS("as_memos",            {}));
   const [memoLabels,      setMemoLabels]      = useState(() => loadLS("as_memo_labels",      ["メモ１", "メモ２"]));
 
+  const importInputRef = useRef(null);
+
+  // ── JSON 全データ エクスポート ────────────────────────────────
+  function handleExportJSON() {
+    const payload = {
+      version: "1.0",
+      exportedAt: new Date().toLocaleString("ja-JP"),
+      data: {
+        staff, types, daySlots, requests,
+        savedSchedules, staffMonthly, memos, memoLabels,
+      }
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    const d    = new Date();
+    a.href     = url;
+    a.download = `autoshift_backup_${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // ── JSON 全データ インポート ──────────────────────────────────
+  function handleImportJSON(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      try {
+        const parsed = JSON.parse(ev.target.result);
+        const d = parsed.data || parsed; // バージョン1.0 or 旧形式
+        if (!window.confirm(
+          `「${file.name}」のデータをインポートします。\n現在の全データが上書きされます。よろしいですか？`
+        )) return;
+        if (d.staff)          setStaff(d.staff);
+        if (d.types)          setTypes(d.types);
+        if (d.daySlots)       setDaySlots(d.daySlots);
+        if (d.requests)       setRequests(d.requests);
+        if (d.savedSchedules) setSavedSchedules(d.savedSchedules);
+        if (d.staffMonthly)   setStaffMonthly(d.staffMonthly);
+        if (d.memos)          setMemos(d.memos);
+        if (d.memoLabels)     setMemoLabels(d.memoLabels);
+        setSched(null); setViolations([]); setTypeCount({});
+        alert("インポートが完了しました。");
+      } catch {
+        alert("ファイルの読み込みに失敗しました。正しい JSON ファイルか確認してください。");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = ""; // 同じファイルを再選択できるようにリセット
+  }
+
   function handleMonthChange(year, month) {
     updateCurrentMonth(year, month);
     setSched(null);
@@ -898,8 +950,26 @@ function App() {
       `}</style>
 
       <header className="bg-blue-700 text-white px-6 py-4 shadow no-print">
-        <h1 className="text-xl font-bold">🗓 オートシフト — プロトタイプ</h1>
-        <p className="text-blue-200 text-sm">{schedYear}年{schedMonth}月 シフト管理</p>
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <h1 className="text-xl font-bold">🗓 オートシフト — プロトタイプ</h1>
+            <p className="text-blue-200 text-sm">{schedYear}年{schedMonth}月 シフト管理</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={handleExportJSON}
+              className="flex items-center gap-1 bg-blue-600 hover:bg-blue-500 border border-blue-400 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors"
+              title="スタッフ・設定・保存シフトをまとめて JSON ファイルに書き出す">
+              📤 データ書き出し
+            </button>
+            <button onClick={() => importInputRef.current?.click()}
+              className="flex items-center gap-1 bg-blue-600 hover:bg-blue-500 border border-blue-400 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors"
+              title="以前書き出した JSON ファイルを読み込む（現在のデータを上書き）">
+              📥 データ読み込み
+            </button>
+            <input ref={importInputRef} type="file" accept=".json"
+              onChange={handleImportJSON} style={{display:"none"}} />
+          </div>
+        </div>
       </header>
 
       <nav className="bg-white border-b flex no-print">
@@ -1014,6 +1084,38 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
         el.style.display = "none";
         setPdfLoading(false);
       });
+  }
+
+  function exportCSV() {
+    if (!sched) return;
+    const typeLabel = v => {
+      if (!v)           return "";
+      if (v === "off")  return "休";
+      if (v === "paid") return "有";
+      return types.find(t => t.id === v)?.name || v;
+    };
+    // ヘッダー行：氏名, 1(日), 2(月), ..., 出勤計
+    const header = ["氏名", ...DATES.map(d => `${d}(${getDayLabel(d)})`), "出勤計"];
+    const rows   = [header];
+    staff.forEach(s => {
+      const row = [s.name];
+      DATES.forEach(d => row.push(typeLabel(sched[s.id]?.[d])));
+      const workDays = DATES.filter(d => {
+        const v = sched[s.id]?.[d];
+        return v && v !== "off" && v !== "paid";
+      }).length;
+      row.push(String(workDays));
+      rows.push(row);
+    });
+    // BOM 付き UTF-8 で Excel でも文字化けしない
+    const csv  = "\uFEFF" + rows.map(r => r.map(c => `"${String(c).replace(/"/g,'""')}"`).join(",")).join("\r\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href     = url;
+    a.download = `シフト表_${schedYear}年${schedMonth}月.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   function handleGenerate() {
@@ -1214,6 +1316,13 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
             <button onClick={exportPDF} disabled={pdfLoading}
               className={`px-5 py-2.5 rounded-lg font-semibold shadow text-white ${pdfLoading ? "bg-gray-400 cursor-wait" : "bg-red-600 hover:bg-red-700"}`}>
               {pdfLoading ? "⏳ 生成中…" : "📄 PDFで保存"}
+            </button>
+          )}
+          {sched && (
+            <button onClick={exportCSV}
+              className="bg-emerald-700 text-white px-5 py-2.5 rounded-lg font-semibold hover:bg-emerald-800 shadow"
+              title="シフト表を CSV ファイルで書き出す（Excel で開けます）">
+              📊 CSVで書き出し
             </button>
           )}
           {sched && (
