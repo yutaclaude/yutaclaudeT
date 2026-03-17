@@ -846,8 +846,8 @@ function App() {
       </nav>
 
       <main className="p-6 max-w-6xl mx-auto no-print">
-        {tab === "slots"    && <SlotsTab    types={types} daySlots={daySlots} setDaySlots={setDaySlots} staff={staff} requests={requests[`${schedYear}-${schedMonth}`]||{}} />}
-        {tab === "requests" && <RequestsTab staff={staff} setStaff={setStaff} requests={requests} setRequests={setRequests} selStaffId={selStaffId} setSelStaffId={setSelStaffId} staffMonthly={staffMonthly} setStaffMonthly={setStaffMonthly} />}
+        {tab === "slots"    && <SlotsTab    types={types} setTypes={setTypes} daySlots={daySlots} setDaySlots={setDaySlots} staff={staff} requests={requests[`${schedYear}-${schedMonth}`]||{}} setTab={setTab} />}
+        {tab === "requests" && <RequestsTab staff={staff} setStaff={setStaff} requests={requests} setRequests={setRequests} selStaffId={selStaffId} setSelStaffId={setSelStaffId} staffMonthly={staffMonthly} setStaffMonthly={setStaffMonthly} setTab={setTab} />}
         {tab === "auto"     && <AutoGenTab  staff={staff} types={types} setTypes={setTypes} daySlots={daySlots} requests={requests[`${schedYear}-${schedMonth}`]||{}}
                                sched={sched} setSched={setSched}
                                violations={violations} setViolations={setViolations}
@@ -859,20 +859,21 @@ function App() {
                                onLoadSchedule={handleLoadSchedule}
                                onDeleteSchedule={handleDeleteSchedule}
                                staffMonthly={staffMonthly}
-                               setStaffMonthly={setStaffMonthly} />}
+                               setStaffMonthly={setStaffMonthly}
+                               setTab={setTab} />}
       </main>
     </div>
   );
 }
 
-// ─── ④ AutoGenTab ────────────────────────────────────────────
+// ─── ③ AutoGenTab ────────────────────────────────────────────
 function AutoGenTab({ staff, types, setTypes, daySlots, requests,
                       sched, setSched, violations, setViolations,
                       typeCount, setTypeCount,
                       prevWeekWork, setPrevWeekWork,
                       schedYear, schedMonth, onMonthChange,
                       savedSchedules, onSaveSchedule, onLoadSchedule, onDeleteSchedule,
-                      staffMonthly, setStaffMonthly }) {
+                      staffMonthly, setStaffMonthly, setTab }) {
   const [editCell,         setEditCell]        = useState(null);
   const [showPrevInput,    setShowPrevInput]   = useState(false);
   const [pdfLoading,       setPdfLoading]      = useState(false);
@@ -906,19 +907,6 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
     });
   }
 
-  // ─ シフト種別管理 state ─
-  const [editTypeId,  setEditTypeId]  = useState(null);
-  const [typeForm,    setTypeForm]    = useState({});
-  const [showAddType, setShowAddType] = useState(false);
-  const [newType,     setNewType]     = useState({name:"",start:"09:00",end:"17:00",color:"#6366f1"});
-
-  function startEditType(t) { setEditTypeId(t.id); setTypeForm({...t}); }
-  function saveType()        { setTypes(p=>p.map(t=>t.id===editTypeId?{...typeForm}:t)); setEditTypeId(null); }
-  function addType()         {
-    if (!newType.name) return;
-    setTypes(p=>[...p,{...newType,id:`T${Date.now()}`}]);
-    setNewType({name:"",start:"09:00",end:"17:00",color:"#6366f1"}); setShowAddType(false);
-  }
 
   function exportPDF() {
     const el = document.getElementById("pdf-print-area");
@@ -1004,6 +992,12 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
           <span className="ml-auto text-xs text-amber-600 flex items-center gap-1">
             ⚠ 月を変更すると現在のシフトはリセットされます
           </span>
+        )}
+        {!sched && (
+          <button onClick={() => setTab("slots")}
+            className="ml-auto text-xs text-gray-500 hover:text-blue-600 transition-colors underline underline-offset-2">
+            ◀ ② シフト枠設定に戻る
+          </button>
         )}
       </div>
 
@@ -1204,72 +1198,6 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
           )}
         </div>
       )}
-
-      {/* ─ シフト種別管理 ─ */}
-      <div className="mb-5 bg-white border border-gray-200 rounded-xl p-4">
-        <h3 className="font-semibold text-gray-700 mb-3">🗂 シフト種別管理（名前・時間・カラーを設定）</h3>
-        <div className="space-y-2">
-          {types.map(t=>(
-            <div key={t.id}>
-              {editTypeId===t.id?(
-                <div className="p-3 bg-gray-50 rounded-lg border border-blue-200 space-y-2">
-                  <input className="border rounded px-2 py-1 w-full text-sm" value={typeForm.name} onChange={e=>setTypeForm(f=>({...f,name:e.target.value}))} placeholder="シフト名" />
-                  <div className="grid grid-cols-2 gap-2">
-                    <div><label className="text-xs text-gray-500 block mb-0.5">開始時間</label>
-                      <input type="time" className="border rounded px-2 py-1 w-full text-sm" value={typeForm.start} onChange={e=>setTypeForm(f=>({...f,start:e.target.value}))} /></div>
-                    <div><label className="text-xs text-gray-500 block mb-0.5">終了時間</label>
-                      <input type="time" className="border rounded px-2 py-1 w-full text-sm" value={typeForm.end} onChange={e=>setTypeForm(f=>({...f,end:e.target.value}))} /></div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <label className="text-xs text-gray-500">カラー</label>
-                    <input type="color" className="w-9 h-9 rounded cursor-pointer border" value={typeForm.color} onChange={e=>setTypeForm(f=>({...f,color:e.target.value}))} />
-                    <span className="text-xs px-3 py-1 rounded-full text-white font-bold" style={{backgroundColor:typeForm.color}}>{typeForm.name||"プレビュー"}</span>
-                  </div>
-                  <div className="flex gap-2">
-                    <button onClick={saveType} className="flex-1 bg-green-600 text-white text-xs py-1.5 rounded hover:bg-green-700">✓ 保存</button>
-                    <button onClick={()=>setEditTypeId(null)} className="flex-1 bg-gray-200 text-xs py-1.5 rounded hover:bg-gray-300">取消</button>
-                  </div>
-                </div>
-              ):(
-                <div className="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-gray-50 group border border-transparent hover:border-gray-200 transition-all">
-                  <div className="flex items-center gap-2.5">
-                    <span className="px-2.5 py-0.5 rounded-full text-white text-xs font-bold shadow-sm" style={{backgroundColor:t.color}}>{t.name}</span>
-                    <span className="text-xs text-gray-400">{t.start} 〜 {t.end}</span>
-                  </div>
-                  <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button onClick={()=>startEditType(t)} className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200">編集</button>
-                    <button onClick={()=>setTypes(p=>p.filter(x=>x.id!==t.id))} className="text-xs bg-red-100 text-red-600 px-2 py-1 rounded hover:bg-red-200">削除</button>
-                  </div>
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-        {showAddType?(
-          <div className="mt-3 p-3 bg-blue-50 rounded-lg border border-blue-200 space-y-2">
-            <input className="border rounded px-2 py-1 w-full text-sm" value={newType.name} onChange={e=>setNewType(n=>({...n,name:e.target.value}))} placeholder="例：夜番" />
-            <div className="grid grid-cols-2 gap-2">
-              <div><label className="text-xs text-gray-500 block mb-0.5">開始</label>
-                <input type="time" className="border rounded px-2 py-1 w-full text-sm" value={newType.start} onChange={e=>setNewType(n=>({...n,start:e.target.value}))} /></div>
-              <div><label className="text-xs text-gray-500 block mb-0.5">終了</label>
-                <input type="time" className="border rounded px-2 py-1 w-full text-sm" value={newType.end} onChange={e=>setNewType(n=>({...n,end:e.target.value}))} /></div>
-            </div>
-            <div className="flex items-center gap-2">
-              <label className="text-xs text-gray-500">カラー</label>
-              <input type="color" className="w-9 h-9 rounded cursor-pointer border" value={newType.color} onChange={e=>setNewType(n=>({...n,color:e.target.value}))} />
-              {newType.name && <span className="text-xs px-3 py-1 rounded-full text-white font-bold" style={{backgroundColor:newType.color}}>{newType.name}</span>}
-            </div>
-            <div className="flex gap-2">
-              <button onClick={addType} disabled={!newType.name} className="flex-1 bg-blue-600 text-white text-xs py-1.5 rounded disabled:opacity-40 hover:bg-blue-700">追加する</button>
-              <button onClick={()=>setShowAddType(false)} className="flex-1 bg-gray-200 text-xs py-1.5 rounded hover:bg-gray-300">取消</button>
-            </div>
-          </div>
-        ):(
-          <button onClick={()=>setShowAddType(true)} className="mt-3 w-full text-sm text-blue-600 border border-dashed border-blue-300 py-2 rounded hover:bg-blue-50">
-            ＋ シフト種別を追加
-          </button>
-        )}
-      </div>
 
       {/* ─ 前月またぎ設定パネル ─ */}
       {showPrevInput && (
@@ -1865,8 +1793,23 @@ function StaffTab({ staff, setStaff }) {
 }
 
 // ─── ② SlotsTab ──────────────────────────────────────────────
-function SlotsTab({ types, daySlots, setDaySlots, staff, requests }) {
+function SlotsTab({ types, setTypes, daySlots, setDaySlots, staff, requests, setTab }) {
   const [subTab,      setSubTab]      = useState("bulk");
+
+  // ─ シフト種別管理 state ─
+  const [showTypesMgmt, setShowTypesMgmt] = useState(false);
+  const [editTypeId,  setEditTypeId]  = useState(null);
+  const [typeForm,    setTypeForm]    = useState({});
+  const [showAddType, setShowAddType] = useState(false);
+  const [newType,     setNewType]     = useState({name:"",start:"09:00",end:"17:00",color:"#6366f1"});
+
+  function startEditType(t) { setEditTypeId(t.id); setTypeForm({...t}); }
+  function saveType()        { setTypes(p=>p.map(t=>t.id===editTypeId?{...typeForm}:t)); setEditTypeId(null); }
+  function addType()         {
+    if (!newType.name) return;
+    setTypes(p=>[...p,{...newType,id:`T${Date.now()}`}]);
+    setNewType({name:"",start:"09:00",end:"17:00",color:"#6366f1"}); setShowAddType(false);
+  }
   // 曜日別テンプレート: 0=日 1=月 … 6=土
   const [dowTpl,      setDowTpl]      = useState({0:[],1:[],2:[],3:[],4:[],5:[],6:[]});
   const [selDow,      setSelDow]      = useState(1); // 選択中の曜日
@@ -1917,6 +1860,87 @@ function SlotsTab({ types, daySlots, setDaySlots, staff, requests }) {
 
   return (
     <div>
+      {/* ─ シフト種別管理（折りたたみ） ─ */}
+      <div className="mb-4 bg-white border border-gray-200 rounded-xl overflow-hidden">
+        <button
+          onClick={() => setShowTypesMgmt(v => !v)}
+          className="w-full flex items-center justify-between px-4 py-3 text-sm font-semibold text-gray-700 hover:bg-gray-50 transition-colors">
+          <span className="flex items-center gap-2">
+            🗂 シフト種別管理
+            <span className="text-xs font-normal text-gray-400">（名前・時間・カラーを設定）</span>
+            {types.length > 0 && (
+              <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-bold">{types.length}種別</span>
+            )}
+          </span>
+          <span className="text-gray-400">{showTypesMgmt ? "▲" : "▼"}</span>
+        </button>
+        {showTypesMgmt && (
+          <div className="border-t border-gray-100 p-4">
+            <div className="space-y-2">
+              {types.map(t=>(
+                <div key={t.id}>
+                  {editTypeId===t.id?(
+                    <div className="p-3 bg-gray-50 rounded-lg border border-blue-200 space-y-2">
+                      <input className="border rounded px-2 py-1 w-full text-sm" value={typeForm.name} onChange={e=>setTypeForm(f=>({...f,name:e.target.value}))} placeholder="シフト名" />
+                      <div className="grid grid-cols-2 gap-2">
+                        <div><label className="text-xs text-gray-500 block mb-0.5">開始時間</label>
+                          <input type="time" className="border rounded px-2 py-1 w-full text-sm" value={typeForm.start} onChange={e=>setTypeForm(f=>({...f,start:e.target.value}))} /></div>
+                        <div><label className="text-xs text-gray-500 block mb-0.5">終了時間</label>
+                          <input type="time" className="border rounded px-2 py-1 w-full text-sm" value={typeForm.end} onChange={e=>setTypeForm(f=>({...f,end:e.target.value}))} /></div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <label className="text-xs text-gray-500">カラー</label>
+                        <input type="color" className="w-9 h-9 rounded cursor-pointer border" value={typeForm.color} onChange={e=>setTypeForm(f=>({...f,color:e.target.value}))} />
+                        <span className="text-xs px-3 py-1 rounded-full text-white font-bold" style={{backgroundColor:typeForm.color}}>{typeForm.name||"プレビュー"}</span>
+                      </div>
+                      <div className="flex gap-2">
+                        <button onClick={saveType} className="flex-1 bg-green-600 text-white text-xs py-1.5 rounded hover:bg-green-700">✓ 保存</button>
+                        <button onClick={()=>setEditTypeId(null)} className="flex-1 bg-gray-200 text-xs py-1.5 rounded hover:bg-gray-300">取消</button>
+                      </div>
+                    </div>
+                  ):(
+                    <div className="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-gray-50 group border border-transparent hover:border-gray-200 transition-all">
+                      <div className="flex items-center gap-2.5">
+                        <span className="px-2.5 py-0.5 rounded-full text-white text-xs font-bold shadow-sm" style={{backgroundColor:t.color}}>{t.name}</span>
+                        <span className="text-xs text-gray-400">{t.start} 〜 {t.end}</span>
+                      </div>
+                      <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button onClick={()=>startEditType(t)} className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200">編集</button>
+                        <button onClick={()=>setTypes(p=>p.filter(x=>x.id!==t.id))} className="text-xs bg-red-100 text-red-600 px-2 py-1 rounded hover:bg-red-200">削除</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+            {showAddType?(
+              <div className="mt-3 p-3 bg-blue-50 rounded-lg border border-blue-200 space-y-2">
+                <input className="border rounded px-2 py-1 w-full text-sm" value={newType.name} onChange={e=>setNewType(n=>({...n,name:e.target.value}))} placeholder="例：夜番" />
+                <div className="grid grid-cols-2 gap-2">
+                  <div><label className="text-xs text-gray-500 block mb-0.5">開始</label>
+                    <input type="time" className="border rounded px-2 py-1 w-full text-sm" value={newType.start} onChange={e=>setNewType(n=>({...n,start:e.target.value}))} /></div>
+                  <div><label className="text-xs text-gray-500 block mb-0.5">終了</label>
+                    <input type="time" className="border rounded px-2 py-1 w-full text-sm" value={newType.end} onChange={e=>setNewType(n=>({...n,end:e.target.value}))} /></div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-gray-500">カラー</label>
+                  <input type="color" className="w-9 h-9 rounded cursor-pointer border" value={newType.color} onChange={e=>setNewType(n=>({...n,color:e.target.value}))} />
+                  {newType.name && <span className="text-xs px-3 py-1 rounded-full text-white font-bold" style={{backgroundColor:newType.color}}>{newType.name}</span>}
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={addType} disabled={!newType.name} className="flex-1 bg-blue-600 text-white text-xs py-1.5 rounded disabled:opacity-40 hover:bg-blue-700">追加する</button>
+                  <button onClick={()=>setShowAddType(false)} className="flex-1 bg-gray-200 text-xs py-1.5 rounded hover:bg-gray-300">取消</button>
+                </div>
+              </div>
+            ):(
+              <button onClick={()=>setShowAddType(true)} className="mt-3 w-full text-sm text-blue-600 border border-dashed border-blue-300 py-2 rounded hover:bg-blue-50">
+                ＋ シフト種別を追加
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
       <div>
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-bold text-gray-800">シフト枠設定</h2>
@@ -2070,6 +2094,20 @@ function SlotsTab({ types, daySlots, setDaySlots, staff, requests }) {
           </div>
         )}
       </div>
+
+      {/* ─ ナビゲーションボタン ─ */}
+      <div className="mt-6 flex items-center justify-between">
+        <button
+          onClick={() => setTab("requests")}
+          className="flex items-center gap-2 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold px-5 py-2.5 rounded-lg transition-colors">
+          ◀ ① 希望入力へ戻る
+        </button>
+        <button
+          onClick={() => setTab("auto")}
+          className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold px-5 py-2.5 rounded-lg shadow transition-colors">
+          ③ 自動生成へ進む ▶
+        </button>
+      </div>
     </div>
   );
 }
@@ -2143,7 +2181,7 @@ function getSixMonths() {
   });
 }
 
-function RequestsTab({ staff, setStaff, requests, setRequests, selStaffId, setSelStaffId, staffMonthly, setStaffMonthly }) {
+function RequestsTab({ staff, setStaff, requests, setRequests, selStaffId, setSelStaffId, staffMonthly, setStaffMonthly, setTab }) {
   const [reqYear,       setReqYear]       = useState(YEAR);
   const [reqMonth,      setReqMonth]      = useState(MONTH);
   const [showStaffMgmt, setShowStaffMgmt] = useState(false);
@@ -2476,6 +2514,15 @@ function RequestsTab({ staff, setStaff, requests, setRequests, selStaffId, setSe
           </div>
         </div>
       )}
+
+      {/* ─ ナビゲーションボタン ─ */}
+      <div className="mt-6 flex justify-end">
+        <button
+          onClick={() => setTab("slots")}
+          className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold px-5 py-2.5 rounded-lg shadow transition-colors">
+          ② シフト枠設定へ進む ▶
+        </button>
+      </div>
     </div>
   );
 }
