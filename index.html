@@ -747,7 +747,15 @@ function App() {
   const [tab,          setTab]          = useState("auto");
   const [staff,        setStaff]        = useState(() => loadLS("as_staff",    INIT_STAFF));
   const [types,        setTypes]        = useState(() => loadLS("as_types",    INIT_TYPES));
-  const [daySlots,     setDaySlots]     = useState(() => loadLS("as_daySlots", {}));
+  const [daySlots,     setDaySlots]     = useState(() => {
+    const raw = loadLS("as_daySlots", {});
+    // 旧フォーマット移行: キーが数値ならば現在月でラップ
+    const keys = Object.keys(raw);
+    if (keys.length > 0 && !isNaN(Number(keys[0]))) {
+      return { [`${YEAR}-${MONTH}`]: raw };
+    }
+    return raw;
+  });
   const [requests,     setRequests]     = useState(() => loadLS("as_requests", {}));
   const [selStaffId,   setSelStaffId]   = useState(() => { const s = loadLS("as_staff", INIT_STAFF); return s[0]?.id ?? INIT_STAFF[0].id; });
   // ④ 自動生成結果をタブ移動後も保持するためにApp側で管理
@@ -884,6 +892,8 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
 
   const mKey = `${schedYear}-${schedMonth}`;
   const monthlyOverrides = staffMonthly[mKey] || {};
+  // 選択月のシフト枠スライス（generateSchedule / computeViolations に渡す）
+  const curDaySlots = daySlots[mKey] || {};
 
   function setMonthlyField(staffId, field, value) {
     setStaffMonthly(prev => ({
@@ -934,7 +944,7 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
   }
 
   function handleGenerate() {
-    const result = generateSchedule(staff, types, daySlots, requests, prevWeekWork, monthlyOverrides);
+    const result = generateSchedule(staff, types, curDaySlots, requests, prevWeekWork, monthlyOverrides);
     setSched(result.sched);
     setViolations(result.violations);
     setTypeCount(result.typeCount);
@@ -945,7 +955,7 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
     const newSched = { ...sched, [staffId]: { ...sched[staffId], [day]: val } };
     setSched(newSched);
     // 手動修正後に違反を再計算 → 解消済みの項目は自動的に消える
-    setViolations(computeViolations(newSched, staff, types, daySlots, requests, prevWeekWork, monthlyOverrides));
+    setViolations(computeViolations(newSched, staff, types, curDaySlots, requests, prevWeekWork, monthlyOverrides));
     setEditCell(null);
   }
 
@@ -962,7 +972,7 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
     if (val === "paid") return { label: "有", fg: PAID_COLOR,  bg: "#ede9fe" };
     if (val === "off")  return { label: "休",   fg: "#ef4444",   bg: "#fff1f2" };
     if (type)           return { label: type.name.slice(0,2), fg: type.color, bg: type.color+"25" };
-    if ((daySlots[day]||[]).length > 0) return { label: "休", fg: "#ef4444", bg: "#fff1f2" };
+    if ((curDaySlots[day]||[]).length > 0) return { label: "休", fg: "#ef4444", bg: "#fff1f2" };
     return { label: "—", fg: "#e5e7eb", bg: "#fff" };
   }
 
@@ -1306,7 +1316,7 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
                       const dow = getDow(day);
                       const isH = isHoliday(day);
                       // 余力／超過：スロット必要人数と実割り当て数の差
-                      const slots = daySlots[day] || [];
+                      const slots = curDaySlots[day] || [];
                       const slack = slots.reduce((sum, sl) => {
                         const assigned = staff.filter(s => (sched?.[s.id]?.[day]) === sl.typeId).length;
                         return sum + Math.max(0, sl.required - assigned);
@@ -1405,7 +1415,7 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
                       <td className="border border-gray-200 px-2 py-1 text-xs font-semibold sticky left-0 bg-gray-50"
                         style={{color:t.color}}>{t.name}必要数</td>
                       {DATES.map(day => {
-                        const slot     = (daySlots[day]||[]).find(s=>s.typeId===t.id);
+                        const slot     = (curDaySlots[day]||[]).find(s=>s.typeId===t.id);
                         const required = slot?.required || 0;
                         const assigned = staff.filter(s => sched[s.id]?.[day] === t.id).length;
                         const under = required > 0 && assigned <  required;
@@ -1513,7 +1523,7 @@ function PrintArea({ sched, staff, types, daySlots, violations }) {
   const violStaff = new Set(violations.filter(v=>v.staffId&&v.day).map(v=>`${v.staffId}-${v.day}`));
 
   function slotStatus(day, typeId) {
-    const slot = (daySlots[day]||[]).find(s=>s.typeId===typeId);
+    const slot = (curDaySlots[day]||[]).find(s=>s.typeId===typeId);
     if (!slot) return null;
     return { required: slot.required, assigned: staff.filter(s=>sched[s.id]?.[day]===typeId).length };
   }
@@ -1795,6 +1805,22 @@ function StaffTab({ staff, setStaff }) {
 // ─── ② SlotsTab ──────────────────────────────────────────────
 function SlotsTab({ types, setTypes, daySlots, setDaySlots, staff, requests, setTab }) {
   const [subTab,      setSubTab]      = useState("bulk");
+  const [slotsYear,   setSlotsYear]   = useState(YEAR);
+  const [slotsMonth,  setSlotsMonth]  = useState(MONTH);
+
+  // ─ 選択月の日付ユーティリティ ─
+  const mKey      = `${slotsYear}-${slotsMonth}`;
+  const mDays     = new Date(slotsYear, slotsMonth, 0).getDate();
+  const mDates    = Array.from({length: mDays}, (_, i) => i + 1);
+  const mHolidays = getHolidaysForMonth(slotsYear, slotsMonth);
+  const mDow      = d => new Date(slotsYear, slotsMonth - 1, d).getDay();
+  const mDayLabel = d => ["日","月","火","水","木","金","土"][mDow(d)];
+  const mIsHol    = d => mHolidays.has(d);
+  const mFirstDow = new Date(slotsYear, slotsMonth - 1, 1).getDay();
+  const mCells    = Array(mFirstDow).fill(null).concat(mDates);
+  const mWeeks    = []; for (let i = 0; i < mCells.length; i += 7) mWeeks.push(mCells.slice(i, i + 7));
+  // 月のスロットデータ（現在選択月のみ）
+  const mSlots    = daySlots[mKey] || {};
 
   // ─ シフト種別管理 state ─
   const [showTypesMgmt, setShowTypesMgmt] = useState(false);
@@ -1820,40 +1846,39 @@ function SlotsTab({ types, setTypes, daySlots, setDaySlots, staff, requests, set
   function applyBulk() {
     const hasAny = Object.values(dowTpl).some(t => t.length > 0);
     if (!hasAny) return;
-    const u = {...daySlots};
-    DATES.forEach(d => {
-      const t = dowTpl[getDow(d)] || [];
-      if (t.length > 0) u[d] = t.map(x => ({...x}));
+    setDaySlots(p => {
+      const u = { ...(p[mKey] || {}) };
+      mDates.forEach(d => {
+        const t = dowTpl[mDow(d)] || [];
+        if (t.length > 0) u[d] = t.map(x => ({...x}));
+      });
+      return { ...p, [mKey]: u };
     });
-    setDaySlots(u); setApplyDone(true); setTimeout(()=>setApplyDone(false),3000);
+    setApplyDone(true); setTimeout(()=>setApplyDone(false),3000);
   }
 
-  const curSlots = daySlots[selDay] || [];
+  const curSlots = mSlots[selDay] || [];
   function addSlotToDay(typeId) {
     if (curSlots.find(s=>s.typeId===typeId)) return;
-    setDaySlots(p=>({...p,[selDay]:[...(p[selDay]||[]),{typeId,required:2}]}));
+    setDaySlots(p=>({...p,[mKey]:{...(p[mKey]||{}),[selDay]:[...((p[mKey]||{})[selDay]||[]),{typeId,required:2}]}}));
   }
   function removeSlotFromDay(typeId) {
-    setDaySlots(p=>({...p,[selDay]:(p[selDay]||[]).filter(s=>s.typeId!==typeId)}));
+    setDaySlots(p=>({...p,[mKey]:{...(p[mKey]||{}),[selDay]:((p[mKey]||{})[selDay]||[]).filter(s=>s.typeId!==typeId)}}));
   }
   function updateRequired(typeId,val) {
-    setDaySlots(p=>({...p,[selDay]:(p[selDay]||[]).map(s=>s.typeId===typeId?{...s,required:Math.max(1,val)}:s)}));
+    setDaySlots(p=>({...p,[mKey]:{...(p[mKey]||{}),[selDay]:((p[mKey]||{})[selDay]||[]).map(s=>s.typeId===typeId?{...s,required:Math.max(1,val)}:s)}}));
   }
   // 0名→スロット削除・1名以上→追加/更新（個別日用の統合ヘルパー）
   function setDaySlotReq(typeId, val) {
     const num = Math.max(0, val);
     if (num === 0) {
-      setDaySlots(p=>({...p,[selDay]:(p[selDay]||[]).filter(s=>s.typeId!==typeId)}));
+      setDaySlots(p=>({...p,[mKey]:{...(p[mKey]||{}),[selDay]:((p[mKey]||{})[selDay]||[]).filter(s=>s.typeId!==typeId)}}));
     } else {
-      const exists = (daySlots[selDay]||[]).find(s=>s.typeId===typeId);
-      if (exists) setDaySlots(p=>({...p,[selDay]:(p[selDay]||[]).map(s=>s.typeId===typeId?{...s,required:num}:s)}));
-      else        setDaySlots(p=>({...p,[selDay]:[...(p[selDay]||[]),{typeId,required:num}]}));
+      const exists = (mSlots[selDay]||[]).find(s=>s.typeId===typeId);
+      if (exists) setDaySlots(p=>({...p,[mKey]:{...(p[mKey]||{}),[selDay]:((p[mKey]||{})[selDay]||[]).map(s=>s.typeId===typeId?{...s,required:num}:s)}}));
+      else        setDaySlots(p=>({...p,[mKey]:{...(p[mKey]||{}),[selDay]:[...((p[mKey]||{})[selDay]||[]),{typeId,required:num}]}}));
     }
   }
-
-  const firstDow = new Date(YEAR, MONTH-1, 1).getDay();
-  const cells = Array(firstDow).fill(null).concat(DATES);
-  const weeks=[]; for(let i=0;i<cells.length;i+=7) weeks.push(cells.slice(i,i+7));
 
   // この日の有給者リスト
   const paidStaff = staff?.filter(s => requests?.[s.id]?.[selDay] === "paid") || [];
@@ -1941,6 +1966,24 @@ function SlotsTab({ types, setTypes, daySlots, setDaySlots, staff, requests, set
         )}
       </div>
 
+      {/* ─ 対象月選択 ─ */}
+      <div className="mb-4 flex flex-wrap items-center gap-3 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3">
+        <span className="text-sm font-semibold text-blue-700">📅 対象月：</span>
+        <select
+          value={slotsYear}
+          onChange={e => { setSlotsYear(Number(e.target.value)); setSelDay(1); }}
+          className="border border-gray-300 rounded px-2 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-400">
+          {[2025,2026,2027,2028].map(y => <option key={y} value={y}>{y}年</option>)}
+        </select>
+        <select
+          value={slotsMonth}
+          onChange={e => { setSlotsMonth(Number(e.target.value)); setSelDay(1); }}
+          className="border border-gray-300 rounded px-2 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-400">
+          {[1,2,3,4,5,6,7,8,9,10,11,12].map(m => <option key={m} value={m}>{m}月</option>)}
+        </select>
+        <span className="text-sm font-bold text-gray-700">{slotsYear}年{slotsMonth}月</span>
+      </div>
+
       <div>
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-bold text-gray-800">シフト枠設定</h2>
@@ -2008,11 +2051,7 @@ function SlotsTab({ types, setTypes, daySlots, setDaySlots, staff, requests, set
             <div className="flex gap-3 mt-2">
               <button onClick={applyBulk} disabled={!Object.values(dowTpl).some(t=>t.length>0)}
                 className={`flex-1 py-3 rounded-lg font-medium transition-all ${applyDone?"bg-green-50 border-2 border-green-500 text-green-700":"bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40"}`}>
-                {applyDone?`✓ ${YEAR}年${MONTH}月に適用しました！`:`✅ ${YEAR}年${MONTH}月に一括適用`}
-              </button>
-              <button onClick={()=>{setCopyDone(true);setTimeout(()=>setCopyDone(false),3000);}}
-                className={`flex-1 py-3 rounded-lg font-medium border-2 transition-all ${copyDone?"bg-green-50 border-green-500 text-green-700":"bg-white border-blue-300 text-blue-700 hover:bg-blue-50"}`}>
-                {copyDone?`✓ ${NEXT_YEAR}年${NEXT_MONTH}月にコピーしました！`:`📋 来月（${NEXT_MONTH}月）にルールをコピー`}
+                {applyDone?`✓ ${slotsYear}年${slotsMonth}月に適用しました！`:`✅ ${slotsYear}年${slotsMonth}月に一括適用`}
               </button>
             </div>
           </div>
@@ -2027,16 +2066,16 @@ function SlotsTab({ types, setTypes, daySlots, setDaySlots, staff, requests, set
                   <div key={d} className={`text-center text-xs font-bold py-1 ${i===0?"text-red-500":i===6?"text-blue-500":"text-gray-500"}`}>{d}</div>
                 ))}
               </div>
-              {weeks.map((week,wi)=>(
+              {mWeeks.map((week,wi)=>(
                 <div key={wi} className="grid grid-cols-7 gap-1 mb-1">
                   {week.map((day,di)=>{
                     if(!day) return <div key={di}/>;
-                    const slots=daySlots[day]||[], isSel=selDay===day, dow=di%7;
+                    const slots=mSlots[day]||[], isSel=selDay===day, dow=di%7;
                     return (
                       <button key={di} onClick={()=>setSelDay(day)}
                         className={`rounded p-1 text-left text-xs border transition-all ${isSel?"border-blue-500 bg-blue-50 shadow":"border-transparent hover:bg-gray-50"}`}>
-                        <div className={`font-bold ${dow===0?"text-red-500":dow===6?"text-blue-500":isHoliday(day)?"text-red-400":"text-gray-700"}`}>
-                          {day}{isHoliday(day)&&<span className="ml-0.5 text-red-400" style={{fontSize:"7px"}}>祝</span>}
+                        <div className={`font-bold ${dow===0?"text-red-500":dow===6?"text-blue-500":mIsHol(day)?"text-red-400":"text-gray-700"}`}>
+                          {day}{mIsHol(day)&&<span className="ml-0.5 text-red-400" style={{fontSize:"7px"}}>祝</span>}
                         </div>
                         <div className="space-y-0.5 mt-0.5">
                           {slots.map(sl=>{const t=types.find(t=>t.id===sl.typeId);
@@ -2052,8 +2091,8 @@ function SlotsTab({ types, setTypes, daySlots, setDaySlots, staff, requests, set
             {/* 選択日の設定 */}
             <div className="bg-white rounded-lg shadow p-4">
               <h3 className="font-semibold text-gray-700 mb-3">
-                {MONTH}月{selDay}日（{getDayLabel(selDay)}）
-                {isHoliday(selDay)&&<span className="ml-2 text-xs bg-red-100 text-red-600 px-2 py-0.5 rounded-full">祝日</span>}
+                {slotsMonth}月{selDay}日（{mDayLabel(selDay)}）
+                {mIsHol(selDay)&&<span className="ml-2 text-xs bg-red-100 text-red-600 px-2 py-0.5 rounded-full">祝日</span>}
                 のシフト枠
               </h3>
 
