@@ -1511,7 +1511,7 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
       )}
 
       {/* ─ 印刷専用エリア ─ */}
-      {sched && <PrintArea sched={sched} staff={staff} types={types} daySlots={daySlots} violations={violations} />}
+      {sched && <PrintArea sched={sched} staff={staff} types={types} daySlots={curDaySlots} violations={violations} />}
     </div>
   );
 }
@@ -1523,7 +1523,7 @@ function PrintArea({ sched, staff, types, daySlots, violations }) {
   const violStaff = new Set(violations.filter(v=>v.staffId&&v.day).map(v=>`${v.staffId}-${v.day}`));
 
   function slotStatus(day, typeId) {
-    const slot = (curDaySlots[day]||[]).find(s=>s.typeId===typeId);
+    const slot = (daySlots[day]||[]).find(s=>s.typeId===typeId);
     if (!slot) return null;
     return { required: slot.required, assigned: staff.filter(s=>sched[s.id]?.[day]===typeId).length };
   }
