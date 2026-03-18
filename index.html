@@ -267,7 +267,21 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}, m
         for (const rd of allRest) { if (rd !== d) minDist = Math.min(minDist, Math.abs(d - rd)); }
         const spacingScore = Math.min(minDist, 7) * 5;
 
-        const total = demandScore + breakScore + weekBalance + spacingScore;
+        // (e) Tier1 役職カバー制約：他の Tier1 スタッフが全員この日に休日計画済みなら強いペナルティ
+        // ※ restPlan は今まさに構築中のため、処理済みスタッフ分だけ参照可能
+        let tier1Penalty = 0;
+        if (TIER1_ROLES.has(s.role)) {
+          const otherTier1 = staff.filter(x => x.id !== s.id && TIER1_ROLES.has(x.role));
+          if (otherTier1.length > 0) {
+            const allOtherResting = otherTier1.every(x => {
+              if (sched[x.id][d] === "off" || sched[x.id][d] === "paid") return true;
+              return (restPlan[x.id] ?? new Set()).has(d);
+            });
+            if (allOtherResting) tier1Penalty = -5000; // 非常に強いペナルティ
+          }
+        }
+
+        const total = demandScore + breakScore + weekBalance + spacingScore + tier1Penalty;
         if (total > bestScore) { bestScore = total; bestDay = d; }
       }
       if (bestDay !== null) planned.add(bestDay);
@@ -328,7 +342,19 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}, m
                       if (wd2.filter(dd => test.has(dd)).length < s.weeklyDaysOff) { ok = false; break; }
                     }
                   }
-                  if (ok && dayDemand(rd) > bestRmScore) { bestRmScore = dayDemand(rd); bestRm = rd; }
+                  if (ok) {
+                    // 除去スコア：需要が高い日ほど除去しやすい（出勤させた方が良い）
+                    let rmScore = dayDemand(rd);
+                    // Tier1 カバー補助：他の全 Tier1 が休みの日は特に優先除去（カバー改善）
+                    if (TIER1_ROLES.has(s.role)) {
+                      const otherT1 = staff.filter(x => x.id !== s.id && TIER1_ROLES.has(x.role));
+                      if (otherT1.length > 0 && otherT1.every(x =>
+                        (restPlan[x.id] ?? new Set()).has(rd) ||
+                        sched[x.id][rd] === "off" || sched[x.id][rd] === "paid"
+                      )) rmScore += 1000;
+                    }
+                    if (rmScore > bestRmScore) { bestRmScore = rmScore; bestRm = rd; }
+                  }
                 }
                 if (bestRm !== null) { restPlan[s.id].delete(bestRm); allRest.delete(bestRm); }
               }
@@ -363,7 +389,15 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}, m
                 if (ok) {
                   const rdW = Array.from({length:7},(_,i)=>getWeekSatStart(rd)+i).filter(dd=>dd>=1&&dd<=DAYS_IN_MONTH);
                   if (rdW.filter(dd => test.has(dd)).length >= s.weeklyDaysOff) {
-                    if (dayDemand(rd) > bestRmScore) { bestRmScore = dayDemand(rd); bestRm = rd; }
+                    let rmScore = dayDemand(rd);
+                    if (TIER1_ROLES.has(s.role)) {
+                      const otherT1 = staff.filter(x => x.id !== s.id && TIER1_ROLES.has(x.role));
+                      if (otherT1.length > 0 && otherT1.every(x =>
+                        (restPlan[x.id] ?? new Set()).has(rd) ||
+                        sched[x.id][rd] === "off" || sched[x.id][rd] === "paid"
+                      )) rmScore += 1000;
+                    }
+                    if (rmScore > bestRmScore) { bestRmScore = rmScore; bestRm = rd; }
                   }
                 }
               }
@@ -655,68 +689,119 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}, m
   });
 
   // ── Phase 5.6：役職カバー修復パス ──────────────────────────────────────────
-  // 最低優先制約：各日に Tier1（店長 or 副店長）が1名も出勤していなければ、
-  // 休み中の Tier1 スタッフを出勤に切り替える（maxConsecutive 違反にならない範囲で）。
-  // Tier1 が全員スケジュール上不可能な日は Tier2（チーフ）にフォールバック。
+  // 最低優先制約：Tier1（店長 or 副店長）が1名も出勤していない日を修復する。
+  // 【戦略1】直接変換：対象日を休み→出勤に変換（maxWork 未達の場合のみ可）
+  // 【戦略2】スワップ  ：別の日（他Tier1がカバー済み・低需要）の勤務を休みに変えて補償
+  // Tier1 が全員不可能な日は Tier2（チーフ）にフォールバック。
   // アラート・違反は一切生成しない（最低優先制約のため）。
   {
     const tier1Staff = staff.filter(s => TIER1_ROLES.has(s.role));
     const tier2Staff = staff.filter(s => TIER2_ROLES.has(s.role));
 
+    // シフト種別を割り当てるヘルパー
+    const pickShiftType = (s, day) => {
+      const slots2 = daySlots[day] || [];
+      if (slots2.length > 0) {
+        return [...slots2].sort((a, b) => {
+          const aGap = a.required - staff.filter(x => sched[x.id][day] === a.typeId).length;
+          const bGap = b.required - staff.filter(x => sched[x.id][day] === b.typeId).length;
+          if (aGap !== bGap) return bGap - aGap;
+          return (typeCount[s.id][a.typeId] || 0) - (typeCount[s.id][b.typeId] || 0);
+        })[0].typeId;
+      }
+      if (types.length > 0) {
+        return types.reduce((a, b) =>
+          (typeCount[s.id][a.id] || 0) <= (typeCount[s.id][b.id] || 0) ? a : b
+        ).id;
+      }
+      return null;
+    };
+
+    // day を出勤にした場合の連勤日数
+    const calcStreak = (s, day) => {
+      let streak = 1;
+      for (let dd = day - 1; dd >= 1 && isWorking(sched[s.id][dd]); dd--) streak++;
+      for (let dd = day + 1; dd <= DAYS_IN_MONTH && isWorking(sched[s.id][dd]); dd++) streak++;
+      return streak;
+    };
+
+    // スタッフ s を day に出勤させる試み（直接変換 or スワップ）
+    const tryPromote = (s, day, allTier1) => {
+      const cur = sched[s.id][day];
+      if (isWorking(cur)) return true;              // すでに出勤中
+      if (requests[s.id]?.[day] === "off") return false; // ユーザー指定 off
+      if (cur === "paid") return false;              // 有給は変更不可
+      if (calcStreak(s, day) > s.maxConsecutive) return false; // 連勤上限
+
+      const paidDays    = DATES.filter(d => sched[s.id][d] === "paid").length;
+      const maxWork     = DAYS_IN_MONTH - (s.requiredDaysOff || 0) - paidDays;
+      const currentWork = DATES.filter(d => isWorking(sched[s.id][d])).length;
+
+      let swapDay = null;
+
+      if (currentWork >= maxWork) {
+        // maxWork 到達済み → スワップ先を探す（別の日の勤務を休みに変えて補償）
+        swapDay = DATES
+          .filter(d => {
+            if (d === day) return false;
+            if (!isWorking(sched[s.id][d])) return false;       // 出勤日でないと交換できない
+            if (requests[s.id]?.[d] === "required") return false; // 必出は外せない
+            // スワップ後も Tier1 がその日をカバーできるか確認（s が消えても OK か）
+            // ※ Tier1 スタッフが1名しかいない場合はこのチェックをスキップ（制約緩和）
+            if (TIER1_ROLES.has(s.role) && allTier1.length > 1) {
+              const otherTier1Works = allTier1.some(x => x.id !== s.id && isWorking(sched[x.id][d]));
+              if (!otherTier1Works) return false; // s を外すと Tier1 不在になる日は使えない
+            }
+            return true;
+          })
+          // 需要が低い日 → スワップしても影響が少ない
+          .sort((a, b) => dayDemand(a) - dayDemand(b))[0] ?? null;
+
+        if (swapDay === null) return false; // スワップ先が見つからなかった
+      }
+
+      const assignedType = pickShiftType(s, day);
+      if (assignedType === null) return false;
+
+      // --- 変換実行 ---
+      sched[s.id][day] = assignedType;
+      typeCount[s.id][assignedType] = (typeCount[s.id][assignedType] || 0) + 1;
+
+      if (swapDay !== null) {
+        const oldType = sched[s.id][swapDay];
+        sched[s.id][swapDay] = "off";
+        if (oldType && typeCount[s.id]?.[oldType] > 0) typeCount[s.id][oldType]--;
+      }
+      return true;
+    };
+
     DATES.forEach(day => {
       // Tier1 カバー確認
-      const tier1Covered = tier1Staff.some(s => isWorking(sched[s.id][day]));
-      if (tier1Covered) return; // 既に Tier1 確保済み → この日はOK
+      if (tier1Staff.some(s => isWorking(sched[s.id][day]))) return; // 確保済み
 
-      // Tier1 スタッフを休み→出勤に変換できるか試みる
-      const tryPromote = (candidates) => {
-        for (const s of candidates) {
-          const cur = sched[s.id][day];
-          // すでに出勤中ならスキップ（isWorking で確認済みだが念のため）
-          if (isWorking(cur)) return true;
-          // ユーザー指定 off/paid は変更不可
-          if (requests[s.id]?.[day] === "off") continue;
-          if (cur === "paid") continue; // 有給は維持
-          // 連勤チェック
-          let streak = 0;
-          for (let dd = day - 1; dd >= 1 && isWorking(sched[s.id][dd]); dd--) streak++;
-          for (let dd = day + 1; dd <= DAYS_IN_MONTH && isWorking(sched[s.id][dd]); dd++) streak++;
-          streak++; // day 自身を出勤にした場合
-          if (streak > s.maxConsecutive) continue; // 連勤超過になるのでスキップ
-          // シフト種別を割り当て（不足スロット優先 → 均等化）
-          const slots2 = daySlots[day] || [];
-          let assignedType = null;
-          if (slots2.length > 0) {
-            const bestSlot = [...slots2].sort((a, b) => {
-              const aGap = a.required - staff.filter(x => sched[x.id][day] === a.typeId).length;
-              const bGap = b.required - staff.filter(x => sched[x.id][day] === b.typeId).length;
-              if (aGap !== bGap) return bGap - aGap;
-              return (typeCount[s.id][a.typeId] || 0) - (typeCount[s.id][b.typeId] || 0);
-            })[0];
-            assignedType = bestSlot.typeId;
-          } else if (types.length > 0) {
-            const best = types.reduce((a, b) =>
-              (typeCount[s.id][a.id] || 0) <= (typeCount[s.id][b.id] || 0) ? a : b
-            );
-            assignedType = best.id;
-          }
-          if (assignedType !== null) {
-            sched[s.id][day] = assignedType;
-            typeCount[s.id][assignedType] = (typeCount[s.id][assignedType] || 0) + 1;
-            return true; // カバー成功
-          }
-        }
-        return false; // 誰も変換できなかった
-      };
+      // Tier1 で試みる（勤務日数が少ない＝余裕があるスタッフを優先）
+      const tier1Sorted = [...tier1Staff].sort((a, b) => {
+        const wa = DATES.filter(d => isWorking(sched[a.id][d])).length;
+        const wb = DATES.filter(d => isWorking(sched[b.id][d])).length;
+        return wa - wb; // 勤務日数が少ない（余裕がある）スタッフを先に試す
+      });
 
-      // まず Tier1 で試みる
-      const promoted = tryPromote(tier1Staff);
-      if (!promoted) {
-        // Tier1 が全員無理なら Tier2（チーフ）で試みる
-        // （チーフも既に出勤中の場合は何もしない = アラートなし）
-        const tier2Covered = tier2Staff.some(s => isWorking(sched[s.id][day]));
-        if (!tier2Covered) {
-          tryPromote(tier2Staff);
+      let covered = false;
+      for (const s of tier1Sorted) {
+        if (tryPromote(s, day, tier1Staff)) { covered = true; break; }
+      }
+
+      if (!covered) {
+        // Tier2 フォールバック（チーフが未出勤の場合のみ）
+        if (!tier2Staff.some(s => isWorking(sched[s.id][day]))) {
+          const tier2Sorted = [...tier2Staff].sort((a, b) => {
+            const wa = DATES.filter(d => isWorking(sched[a.id][d])).length;
+            const wb = DATES.filter(d => isWorking(sched[b.id][d])).length;
+            return wa - wb;
+          });
+          for (const s of tier2Sorted) {
+            if (tryPromote(s, day, tier2Staff)) break;
+          }
         }
       }
     });
