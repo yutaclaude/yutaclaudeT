@@ -1174,8 +1174,9 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
   const [showSaveForm,     setShowSaveForm]    = useState(false);
   const [saveName,         setSaveName]        = useState("");
   const [showSavedList,    setShowSavedList]   = useState(false);
-  const [showMonthlyCond,  setShowMonthlyCond] = useState(false);
-  const [editMemoLabel,    setEditMemoLabel]   = useState(null); // 編集中のメモラベル行インデックス
+  const [showMonthlyCond,    setShowMonthlyCond]    = useState(false);
+  const [showConstraintInfo, setShowConstraintInfo] = useState(false);
+  const [editMemoLabel,      setEditMemoLabel]      = useState(null); // 編集中のメモラベル行インデックス
 
   const mKey = `${schedYear}-${schedMonth}`;
   const monthlyOverrides = staffMonthly[mKey] || {};
@@ -1355,6 +1356,149 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
             className="ml-auto text-xs text-gray-500 hover:text-blue-600 transition-colors underline underline-offset-2">
             ◀ ② シフト枠設定に戻る
           </button>
+        )}
+      </div>
+
+      {/* ─ 制約一覧 ─ */}
+      <div className="mb-4 bg-white border border-gray-200 rounded-xl overflow-hidden">
+        <button
+          onClick={() => setShowConstraintInfo(v => !v)}
+          className="w-full flex items-center justify-between px-4 py-3 text-sm font-semibold text-gray-700 hover:bg-gray-50 transition-colors">
+          <span>📋 自動生成の制約一覧</span>
+          <span className="text-gray-400">{showConstraintInfo ? "▲" : "▼"}</span>
+        </button>
+        {showConstraintInfo && (
+          <div className="px-4 pb-5 pt-1 text-xs text-gray-700 space-y-4 border-t border-gray-100">
+
+            {/* 優先度バッジ共通コンポーネント */}
+            {(() => {
+              const Badge = ({ level }) => {
+                const styles = {
+                  "最高": "bg-red-100 text-red-700 border border-red-300",
+                  "高":   "bg-orange-100 text-orange-700 border border-orange-300",
+                  "中":   "bg-yellow-100 text-yellow-700 border border-yellow-300",
+                  "低":   "bg-blue-100 text-blue-700 border border-blue-300",
+                  "最低": "bg-gray-100 text-gray-500 border border-gray-300",
+                };
+                return (
+                  <span className={`inline-block text-[10px] font-bold px-1.5 py-0.5 rounded mr-1.5 ${styles[level] || styles["中"]}`}>
+                    優先度：{level}
+                  </span>
+                );
+              };
+
+              const Section = ({ title, color, children }) => (
+                <div>
+                  <div className={`text-[11px] font-bold mb-1.5 pb-0.5 border-b ${color}`}>{title}</div>
+                  <div className="space-y-1.5 pl-1">{children}</div>
+                </div>
+              );
+
+              const Row = ({ no, badge, label, detail, warn }) => (
+                <div className="flex items-start gap-1.5">
+                  <span className="shrink-0 w-5 h-5 rounded-full bg-gray-200 text-gray-600 text-[10px] font-bold flex items-center justify-center mt-0.5">{no}</span>
+                  <div>
+                    <span>{badge}</span>
+                    <span className="font-semibold">{label}</span>
+                    {detail && <span className="text-gray-500 ml-1">{detail}</span>}
+                    {warn  && <span className="text-orange-600 ml-1">⚠ {warn}</span>}
+                  </div>
+                </div>
+              );
+
+              return (
+                <div className="space-y-4">
+
+                  {/* カテゴリ1：絶対制約 */}
+                  <Section title="■ カテゴリ A：ユーザー指定（絶対制約）" color="border-red-300 text-red-700">
+                    <Row no="1" badge={<Badge level="最高"/>}
+                      label="休日リクエスト"
+                      detail="— タブ②で「休み」指定した日は自動生成で出勤に変更されません" />
+                    <Row no="2" badge={<Badge level="最高"/>}
+                      label="有給リクエスト"
+                      detail="— タブ②で「有給」指定した日は有給として固定（必須休日にはカウントしません）" />
+                    <Row no="3" badge={<Badge level="最高"/>}
+                      label="必出リクエスト"
+                      detail="— タブ②で「必出」指定した日は強制的に出勤（他の制約より優先）" />
+                  </Section>
+
+                  {/* カテゴリ2：個人制約（高優先） */}
+                  <Section title="■ カテゴリ B：個人スタッフ制約（高優先）" color="border-orange-300 text-orange-700">
+                    <Row no="4" badge={<Badge level="高"/>}
+                      label="月の必須休日数"
+                      detail="— 有給を除く「休日」が指定日数以上になるよう計画（設定：タブ②スタッフ管理 or 月別条件）"
+                      warn="不足するとアラート発生" />
+                    <Row no="5" badge={<Badge level="高"/>}
+                      label="週の休日数（週休）"
+                      detail="— 土〜金を1週とし、各週に指定日数以上の休日を確保（有給は休日にカウントしない）"
+                      warn="不足するとアラート発生" />
+                    <Row no="6" badge={<Badge level="高"/>}
+                      label="最大連勤日数"
+                      detail="— 指定日数を超える連続出勤を自動回避（例：上限3日 → 3連勤まで）"
+                      warn="超過するとアラート発生" />
+                    <Row no="7" badge={<Badge level="中"/>}
+                      label="最低勤務日数"
+                      detail="— 月の出勤日数が指定値以上になるよう後処理パスで調整（Phase 5.5）"
+                      warn="0設定時は無効" />
+                  </Section>
+
+                  {/* カテゴリ3：スロット制約 */}
+                  <Section title="■ カテゴリ C：シフト枠制約（中優先）" color="border-yellow-400 text-yellow-700">
+                    <Row no="8" badge={<Badge level="中"/>}
+                      label="シフト種別の必要人数"
+                      detail="— タブ①で設定した「日付×シフト種別×必要人数」を充足するよう割り当て" />
+                    <Row no="9" badge={<Badge level="中"/>}
+                      label="需給バランス調整"
+                      detail="— 人手不足日の休日を余剰日へスワップして全体の充足率を最大化（Phase 2）" />
+                    <Row no="10" badge={<Badge level="中"/>}
+                      label="限界値チェック（事前警告）"
+                      detail={`— 必要人数がスタッフ数−2（限界値）を超えると生成前に警告（現在の限界値：${Math.max(1, staff.length - 2)}名）`} />
+                  </Section>
+
+                  {/* カテゴリ4：役職制約 */}
+                  <Section title="■ カテゴリ D：役職カバー制約（低優先・ベストエフォート）" color="border-blue-300 text-blue-700">
+                    <Row no="11" badge={<Badge level="低"/>}
+                      label="Tier 1 カバー（店長・副店長）"
+                      detail="— 各日に店長か副店長のいずれかが出勤するよう計画・後処理パスで補完（Phase 5.6）" />
+                    <Row no="12" badge={<Badge level="最低"/>}
+                      label="Tier 2 フォールバック（チーフ）"
+                      detail="— Tier 1 が全員出勤不可の日はチーフが出勤するよう試みる" />
+                    <Row no="13" badge={<Badge level="最低"/>}
+                      label="役職カバー失敗はアラートなし"
+                      detail="— 制約優先度が最低のため、他の制約を守った結果カバーできなくてもアラートは発生しません" />
+                  </Section>
+
+                  {/* カテゴリ5：最適化スコア */}
+                  <Section title="■ カテゴリ E：休日配置の最適化スコア（調整項目）" color="border-gray-300 text-gray-500">
+                    <Row no="14" badge={<Badge level="低"/>}
+                      label="需要の低い日に休日を配置"
+                      detail="— シフト枠の要求人数が少ない日を優先して休日に割り当て（スコア係数×3）" />
+                    <Row no="15" badge={<Badge level="低"/>}
+                      label="長い連勤を分断する日を優先"
+                      detail="— 連勤上限を超える手前で休日を挿入するとスコア+300" />
+                    <Row no="16" badge={<Badge level="低"/>}
+                      label="週の休日不足がある週を優先"
+                      detail="— 週休が不足している週に休日を配置するとスコア+100（有給は除外して判定）" />
+                    <Row no="17" badge={<Badge level="最低"/>}
+                      label="休日を均等分散"
+                      detail="— 連続する休日を避け、休日同士が離れるほどスコア加算（最大+35）" />
+                    <Row no="18" badge={<Badge level="低"/>}
+                      label="Tier1 役職カバー日を避ける（Tier1のみ）"
+                      detail="— 他のTier1全員が休日計画済みの日に休日を置くとスコア−5000（重ペナルティ）" />
+                  </Section>
+
+                  {/* 補足 */}
+                  <div className="mt-2 p-2.5 bg-gray-50 rounded-lg border border-gray-200 text-gray-500 leading-relaxed">
+                    <span className="font-semibold text-gray-600">📌 優先順位の考え方：</span>
+                    <span className="ml-1">
+                      制約は 最高（ユーザー指定）→ 高（個人制約）→ 中（スロット充足）→ 低（役職カバー）の順で処理されます。
+                      後処理パスで可能な限り修復しますが、複数制約が競合する場合は上位優先度の制約が維持されます。
+                    </span>
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
         )}
       </div>
 
