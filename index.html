@@ -255,10 +255,11 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}, m
         const breakScore = (wBefore + 1 + wAfter > s.maxConsecutive) ? 300 : 0;
 
         // (c) 週（土〜金）の休日が不足しているなら加点
+        // ※ 有給は必須休日にカウントしないため、週の休日不足チェックでも有給を除外する
         const wStart = getWeekSatStart(d);
         let weekRest = 0;
         for (let dd = Math.max(1, wStart); dd < Math.min(DAYS_IN_MONTH + 1, wStart + 7); dd++) {
-          if (allRest.has(dd)) weekRest++;
+          if (allRest.has(dd) && !paidSet.has(dd)) weekRest++; // 有給は除外
         }
         const weekBalance = weekRest < s.weeklyDaysOff ? 100 : 0;
 
@@ -365,10 +366,11 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}, m
       }
 
       // --- 週休チェック＆修正 ---
+      // ※ 有給は必須休日にカウントしないため、週の休日不足チェックでも有給を除外する
       const weekStarts = [...new Set(DATES.map(d => getWeekSatStart(d)))];
       weekStarts.forEach(wStart => {
         const wDays = Array.from({length:7},(_,i)=>wStart+i).filter(d=>d>=1&&d<=DAYS_IN_MONTH);
-        const wRest = wDays.filter(d => allRest.has(d)).length;
+        const wRest = wDays.filter(d => allRest.has(d) && !paidSet.has(d)).length; // 有給除外
         if (wRest < s.weeklyDaysOff) {
           const cands = wDays.filter(d => !allRest.has(d) && !reqSet.has(d));
           if (cands.length > 0) {
@@ -850,17 +852,18 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}, m
       violations.push({ staffId: s.id, severity: "error",
         message: `${s.name}：月の出勤日数 ${actualWork}日（必須 ${s.minWorkDays}日）— 制約上これ以上割り当て不可` });
 
-    // 週（土〜金）の休日不足チェック
+    // 週（土〜金）の休日不足チェック（有給は必須休日にカウントしない）
     const weekStarts = [...new Set(DATES.map(d => getWeekSatStart(d)))];
     weekStarts.forEach(wStart => {
       const weekDaysInMonth = Array.from({length:7}, (_,i)=>wStart+i).filter(d=>d>=1&&d<=DAYS_IN_MONTH);
       const workInMonth     = weekDaysInMonth.filter(d => isWorking(sched[s.id][d])).length;
+      const paidInWeek      = weekDaysInMonth.filter(d => sched[s.id][d] === "paid").length;
       const prevWork        = wStart < 1 ? (prevWeekWork[s.id] || 0) : 0;
-      const totalWork       = workInMonth + prevWork;
+      const totalNonOff     = workInMonth + paidInWeek + prevWork; // 出勤＋有給は「休日」ではない
       const totalWeekLen    = weekDaysInMonth.length + (wStart < 1 ? -wStart : 0);
-      if (totalWork > totalWeekLen - s.weeklyDaysOff)
+      if (totalNonOff > totalWeekLen - s.weeklyDaysOff)
         violations.push({ staffId: s.id, severity: "warning",
-          message: `${s.name}：${MONTH}/${Math.max(1,wStart)}週 週の休日不足（${totalWeekLen - totalWork}日/${s.weeklyDaysOff}日必要）` });
+          message: `${s.name}：${MONTH}/${Math.max(1,wStart)}週 週の休日不足（${totalWeekLen - workInMonth - paidInWeek}日/${s.weeklyDaysOff}日必要）` });
     });
   });
 
@@ -921,17 +924,18 @@ function computeViolations(sched, staff, types, daySlots, requests, prevWeekWork
       violations.push({ staffId: s.id, severity: "error",
         message: `${s.name}：月の出勤日数 ${actualWork}日（必須 ${s.minWorkDays}日）— 制約上これ以上割り当て不可` });
 
-    // 週（土〜金）の休日不足
+    // 週（土〜金）の休日不足（有給は必須休日にカウントしない）
     const weekStarts = [...new Set(DATES.map(d => getWeekSatStart(d)))];
     weekStarts.forEach(wStart => {
       const weekDaysInMonth = Array.from({length:7}, (_,i) => wStart+i).filter(d => d>=1 && d<=DAYS_IN_MONTH);
       const workInMonth  = weekDaysInMonth.filter(d => isWorking(sched[s.id]?.[d])).length;
+      const paidInWeek   = weekDaysInMonth.filter(d => sched[s.id]?.[d] === "paid").length;
       const prevWork     = wStart < 1 ? (prevWeekWork[s.id] || 0) : 0;
-      const totalWork    = workInMonth + prevWork;
+      const totalNonOff  = workInMonth + paidInWeek + prevWork;
       const totalWeekLen = weekDaysInMonth.length + (wStart < 1 ? -wStart : 0);
-      if (totalWork > totalWeekLen - s.weeklyDaysOff)
+      if (totalNonOff > totalWeekLen - s.weeklyDaysOff)
         violations.push({ staffId: s.id, severity: "warning",
-          message: `${s.name}：${MONTH}/${Math.max(1,wStart)}週 週の休日不足（${totalWeekLen - totalWork}日/${s.weeklyDaysOff}日必要）` });
+          message: `${s.name}：${MONTH}/${Math.max(1,wStart)}週 週の休日不足（${totalWeekLen - workInMonth - paidInWeek}日/${s.weeklyDaysOff}日必要）` });
     });
 
     // 必出が未出勤
