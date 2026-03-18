@@ -835,7 +835,7 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}, m
       if (isWorking(sched[s.id][day])) {
         consec++;
         if (consec > s.maxConsecutive)
-          violations.push({ day, staffId: s.id, severity: "warning",
+          violations.push({ day, staffId: s.id, severity: "error",
             message: `${s.name}：${MONTH}/${day}に${consec}連勤（上限${s.maxConsecutive}日）` });
       } else consec = 0;
     });
@@ -843,7 +843,7 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}, m
     // 月の必須休日不足チェック（有給は含めない）
     const offDays = DATES.filter(d => { const v = sched[s.id][d]; return v === "off" || v === null; }).length;
     if (offDays < (s.requiredDaysOff || 0))
-      violations.push({ staffId: s.id, severity: "warning",
+      violations.push({ staffId: s.id, severity: "error",
         message: `${s.name}：月の休日（有給除く） ${offDays}日（必須 ${s.requiredDaysOff}日）` });
 
     // 月の必須勤務日数不足チェック（補完パス後もなお未達 → 制約により達成不可）
@@ -867,7 +867,18 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}, m
     });
   });
 
-  // ※ 役職カバー不足は最低優先制約のため違反・アラート生成なし（Phase 5.6 でベストエフォート補完済み）
+  // ─ No.11：Tier1 カバー違反チェック（Phase 5.6 補完後もカバー不可の場合は error アラート）
+  {
+    const tier1StaffCheck = staff.filter(s => TIER1_ROLES.has(s.role));
+    if (tier1StaffCheck.length > 0) {
+      DATES.forEach(day => {
+        if (!tier1StaffCheck.some(s => isWorking(sched[s.id][day]))) {
+          violations.push({ day, severity: "error",
+            message: `${MONTH}/${day}（${getDayLabel(day)}）：店長・副店長が不在 — Tier1カバー制約違反` });
+        }
+      });
+    }
+  }
 
   return { sched, violations, typeCount };
 }
@@ -907,7 +918,7 @@ function computeViolations(sched, staff, types, daySlots, requests, prevWeekWork
       if (isWorking(sched[s.id]?.[day])) {
         consec++;
         if (consec > s.maxConsecutive)
-          violations.push({ day, staffId: s.id, severity: "warning",
+          violations.push({ day, staffId: s.id, severity: "error",
             message: `${s.name}：${MONTH}/${day}に${consec}連勤（上限${s.maxConsecutive}日）` });
       } else consec = 0;
     });
@@ -915,7 +926,7 @@ function computeViolations(sched, staff, types, daySlots, requests, prevWeekWork
     // 月の必須休日不足（有給は含めない）
     const offDays = DATES.filter(d => { const v = sched[s.id]?.[d]; return v === "off" || v === null; }).length;
     if (offDays < (s.requiredDaysOff || 0))
-      violations.push({ staffId: s.id, severity: "warning",
+      violations.push({ staffId: s.id, severity: "error",
         message: `${s.name}：月の休日（有給除く） ${offDays}日（必須 ${s.requiredDaysOff}日）` });
 
     // 月の必須勤務日数不足
@@ -946,7 +957,18 @@ function computeViolations(sched, staff, types, daySlots, requests, prevWeekWork
     });
   });
 
-  // ※ 役職カバー不足は最低優先制約のため違反・アラート生成なし
+  // ─ No.11：Tier1 カバー違反チェック
+  {
+    const tier1StaffCheck = staff.filter(s => TIER1_ROLES.has(s.role));
+    if (tier1StaffCheck.length > 0) {
+      DATES.forEach(day => {
+        if (!tier1StaffCheck.some(s => isWorking(sched[s.id]?.[day]))) {
+          violations.push({ day, severity: "error",
+            message: `${MONTH}/${day}（${getDayLabel(day)}）：店長・副店長が不在 — Tier1カバー制約違反` });
+        }
+      });
+    }
+  }
 
   return violations;
 }
@@ -1410,7 +1432,7 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
                 <div className="space-y-4">
 
                   {/* カテゴリ1：絶対制約 */}
-                  <Section title="■ カテゴリ A：ユーザー指定（絶対制約）" color="border-red-300 text-red-700">
+                  <Section title="■ カテゴリ A：絶対制約（違反は必ずエラー表示）" color="border-red-300 text-red-700">
                     <Row no="1" badge={<Badge level="最高"/>}
                       label="休日リクエスト"
                       detail="— タブ②で「休み」指定した日は自動生成で出勤に変更されません" />
@@ -1420,22 +1442,26 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
                     <Row no="3" badge={<Badge level="最高"/>}
                       label="必出リクエスト"
                       detail="— タブ②で「必出」指定した日は強制的に出勤（他の制約より優先）" />
+                    <Row no="4" badge={<Badge level="最高"/>}
+                      label="月の必須休日数"
+                      detail="— 有給を除く「休日」が指定日数以上になるよう計画（設定：タブ②スタッフ管理 or 月別条件）"
+                      warn="不足するとエラー発生" />
+                    <Row no="6" badge={<Badge level="最高"/>}
+                      label="最大連勤日数"
+                      detail="— 指定日数を超える連続出勤を自動回避（例：上限3日 → 3連勤まで）"
+                      warn="超過するとエラー発生" />
+                    <Row no="11" badge={<Badge level="最高"/>}
+                      label="Tier 1 カバー（店長・副店長）"
+                      detail="— 各日に店長か副店長のいずれかが出勤するよう計画・後処理パスで補完（Phase 5.6）"
+                      warn="補完後もカバー不可の日はエラー発生" />
                   </Section>
 
                   {/* カテゴリ2：個人制約（高優先） */}
                   <Section title="■ カテゴリ B：個人スタッフ制約（高優先）" color="border-orange-300 text-orange-700">
-                    <Row no="4" badge={<Badge level="高"/>}
-                      label="月の必須休日数"
-                      detail="— 有給を除く「休日」が指定日数以上になるよう計画（設定：タブ②スタッフ管理 or 月別条件）"
-                      warn="不足するとアラート発生" />
                     <Row no="5" badge={<Badge level="高"/>}
                       label="週の休日数（週休）"
                       detail="— 土〜金を1週とし、各週に指定日数以上の休日を確保（有給は休日にカウントしない）"
                       warn="不足するとアラート発生" />
-                    <Row no="6" badge={<Badge level="高"/>}
-                      label="最大連勤日数"
-                      detail="— 指定日数を超える連続出勤を自動回避（例：上限3日 → 3連勤まで）"
-                      warn="超過するとアラート発生" />
                     <Row no="7" badge={<Badge level="中"/>}
                       label="最低勤務日数"
                       detail="— 月の出勤日数が指定値以上になるよう後処理パスで調整（Phase 5.5）"
@@ -1456,33 +1482,27 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
                   </Section>
 
                   {/* カテゴリ4：役職制約 */}
-                  <Section title="■ カテゴリ D：役職カバー制約（低優先・ベストエフォート）" color="border-blue-300 text-blue-700">
-                    <Row no="11" badge={<Badge level="低"/>}
-                      label="Tier 1 カバー（店長・副店長）"
-                      detail="— 各日に店長か副店長のいずれかが出勤するよう計画・後処理パスで補完（Phase 5.6）" />
-                    <Row no="12" badge={<Badge level="最低"/>}
+                  <Section title="■ カテゴリ D：役職カバー制約（ベストエフォート）" color="border-blue-300 text-blue-700">
+                    <Row no="12" badge={<Badge level="低"/>}
                       label="Tier 2 フォールバック（チーフ）"
-                      detail="— Tier 1 が全員出勤不可の日はチーフが出勤するよう試みる" />
-                    <Row no="13" badge={<Badge level="最低"/>}
-                      label="役職カバー失敗はアラートなし"
-                      detail="— 制約優先度が最低のため、他の制約を守った結果カバーできなくてもアラートは発生しません" />
+                      detail="— Tier 1 が全員出勤不可の日はチーフが出勤するよう試みる（ベストエフォート）" />
                   </Section>
 
                   {/* カテゴリ5：最適化スコア */}
                   <Section title="■ カテゴリ E：休日配置の最適化スコア（調整項目）" color="border-gray-300 text-gray-500">
-                    <Row no="14" badge={<Badge level="低"/>}
+                    <Row no="13" badge={<Badge level="低"/>}
                       label="需要の低い日に休日を配置"
                       detail="— シフト枠の要求人数が少ない日を優先して休日に割り当て（スコア係数×3）" />
-                    <Row no="15" badge={<Badge level="低"/>}
+                    <Row no="14" badge={<Badge level="低"/>}
                       label="長い連勤を分断する日を優先"
                       detail="— 連勤上限を超える手前で休日を挿入するとスコア+300" />
-                    <Row no="16" badge={<Badge level="低"/>}
+                    <Row no="15" badge={<Badge level="低"/>}
                       label="週の休日不足がある週を優先"
                       detail="— 週休が不足している週に休日を配置するとスコア+100（有給は除外して判定）" />
-                    <Row no="17" badge={<Badge level="最低"/>}
+                    <Row no="16" badge={<Badge level="最低"/>}
                       label="休日を均等分散"
                       detail="— 連続する休日を避け、休日同士が離れるほどスコア加算（最大+35）" />
-                    <Row no="18" badge={<Badge level="低"/>}
+                    <Row no="17" badge={<Badge level="低"/>}
                       label="Tier1 役職カバー日を避ける（Tier1のみ）"
                       detail="— 他のTier1全員が休日計画済みの日に休日を置くとスコア−5000（重ペナルティ）" />
                   </Section>
@@ -1491,8 +1511,9 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
                   <div className="mt-2 p-2.5 bg-gray-50 rounded-lg border border-gray-200 text-gray-500 leading-relaxed">
                     <span className="font-semibold text-gray-600">📌 優先順位の考え方：</span>
                     <span className="ml-1">
-                      制約は 最高（ユーザー指定）→ 高（個人制約）→ 中（スロット充足）→ 低（役職カバー）の順で処理されます。
-                      後処理パスで可能な限り修復しますが、複数制約が競合する場合は上位優先度の制約が維持されます。
+                      カテゴリA（絶対制約）は必ず守られ、違反時はエラーアラートが表示されます。
+                      カテゴリB〜C（個人・スロット制約）は高優先で可能な限り充足されます。
+                      複数制約が競合する場合は上位カテゴリの制約が維持されます。
                     </span>
                   </div>
                 </div>
