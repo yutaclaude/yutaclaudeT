@@ -116,9 +116,7 @@ const INIT_STAFF = [
 ];
 
 const INIT_TYPES = [
-  { id: "A", name: "早番", start: "09:00", end: "15:00", color: "#3b82f6" },
-  { id: "B", name: "遅番", start: "15:00", end: "21:00", color: "#f59e0b" },
-  { id: "C", name: "通し", start: "09:00", end: "21:00", color: "#10b981" },
+  { id: "C", name: "通し", color: "#10b981" },
 ];
 
 const MAIN_TABS = [
@@ -503,12 +501,11 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}, m
     if (diffA !== diffB) return diffB - diffA; // 不足が大きい日を先に
     return a - b;
   });
+  // 通しタイプ（自動生成で使用する唯一のシフト種別）
+  const toshiType = types.find(t => t.id === "C") || types[0];
+
   sortedDates.forEach(day => {
-    const slots = [...(daySlots[day] || [])].sort((a, b) => {
-      const sa = types.find(t => t.id === a.typeId)?.start || "";
-      const sb = types.find(t => t.id === b.typeId)?.start || "";
-      return sa.localeCompare(sb);
-    });
+    const slots = [...(daySlots[day] || [])];
 
     // スロットに出勤者を割り当て
     slots.forEach(({ typeId, required }) => {
@@ -549,28 +546,13 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}, m
       // ※ スロット充足違反は Phase 5 修復後の最終状態でのみ記録する（Phase 3 では記録しない）
     });
 
-    // この日の残り null スタッフ（出勤予定だがスロット割り当てなし）→ 最も不足しているスロットに割り当て
+    // この日の残り null スタッフ（出勤予定だがスロット未割り当て）→ すべて「通し」で出勤
+    // 自動生成は通しのみ。スロット不足があれば通しで補充、余剰も通しで出勤させる。
+    if (!toshiType) return;
     staff.forEach(s => {
       if (sched[s.id][day] !== null) return;
-      const slots2 = daySlots[day] || [];
-      if (slots2.length === 0) {
-        if (types.length > 0) {
-          const best = types.reduce((a, b) =>
-            (typeCount[s.id][a.id]||0) <= (typeCount[s.id][b.id]||0) ? a : b
-          );
-          sched[s.id][day] = best.id;
-          typeCount[s.id][best.id]++;
-        }
-        return;
-      }
-      const bestSlot = [...slots2].sort((a, b) => {
-        const aGap = a.required - staff.filter(x => sched[x.id][day] === a.typeId).length;
-        const bGap = b.required - staff.filter(x => sched[x.id][day] === b.typeId).length;
-        if (aGap !== bGap) return bGap - aGap;
-        return (typeCount[s.id][a.typeId]||0) - (typeCount[s.id][b.typeId]||0);
-      })[0];
-      sched[s.id][day] = bestSlot.typeId;
-      typeCount[s.id][bestSlot.typeId]++;
+      sched[s.id][day] = toshiType.id;
+      typeCount[s.id][toshiType.id] = (typeCount[s.id][toshiType.id] || 0) + 1;
     });
   });
 
@@ -695,7 +677,9 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}, m
           if (aGap !== bGap) return bGap - aGap;
           return (typeCount[s.id][a.typeId] || 0) - (typeCount[s.id][b.typeId] || 0);
         })[0];
-        assignedType = bestSlot.typeId;
+        const gap = bestSlot.required - staff.filter(x => sched[x.id][d] === bestSlot.typeId).length;
+        if (gap > 0) assignedType = bestSlot.typeId;
+        // gap <= 0 の場合は全スロット充足済み → この日はスキップ（過剰割り当て防止）
       } else if (types.length > 0) {
         const best = types.reduce((a, b) =>
           (typeCount[s.id][a.id] || 0) <= (typeCount[s.id][b.id] || 0) ? a : b
@@ -829,6 +813,59 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}, m
     });
   }
 
+  // ── Phase 5.7：休日数超過の修正 ─────────────────────────────────────────
+  // Phase 1.5 の連勤・週休修正パスで余分に追加された休日を出勤に戻す。
+  // requiredDaysOff を超えた休日（ユーザー指定 off 以外）を需要の高い日から順に
+  // 出勤に変換する。連勤・週休制約を通過した日のみ変換する。
+  staff.forEach(s => {
+    const effReqOff = (s.requiredDaysOff || 0);
+    const actualOff = DATES.filter(d => sched[s.id][d] === "off").length;
+    let excess      = actualOff - effReqOff;
+    if (excess <= 0) return;
+
+    // ユーザー指定 off 以外の休日を需要の高い順に列挙
+    const candidates = DATES
+      .filter(d => sched[s.id][d] === "off" && requests[s.id]?.[d] !== "off")
+      .sort((a, b) => dayDemand(b) - dayDemand(a));
+
+    for (const d of candidates) {
+      if (excess <= 0) break;
+
+      // 連勤チェック：出勤にしたとき maxConsecutive を超えないか
+      let streak = 1;
+      for (let dd = d - 1; dd >= 1 && isWorking(sched[s.id][dd]); dd--) streak++;
+      for (let dd = d + 1; dd <= DAYS_IN_MONTH && isWorking(sched[s.id][dd]); dd++) streak++;
+      if (streak > s.maxConsecutive) continue;
+
+      // 週休チェック：出勤にしても weeklyDaysOff が確保されるか（有給は除外）
+      const wStart = getWeekSatStart(d);
+      const wDays  = Array.from({length:7},(_,i)=>wStart+i).filter(dd=>dd>=1&&dd<=DAYS_IN_MONTH);
+      const wRest  = wDays.filter(dd => dd !== d && sched[s.id][dd] === "off").length;
+      if (wRest < s.weeklyDaysOff) continue;
+
+      // シフト種別を割り当て（不足スロット優先 → 均等化）
+      const slots2 = daySlots[d] || [];
+      let assignedType = null;
+      if (slots2.length > 0) {
+        assignedType = [...slots2].sort((a, b) => {
+          const aGap = a.required - staff.filter(x => sched[x.id][d] === a.typeId).length;
+          const bGap = b.required - staff.filter(x => sched[x.id][d] === b.typeId).length;
+          if (aGap !== bGap) return bGap - aGap;
+          return (typeCount[s.id][a.typeId] || 0) - (typeCount[s.id][b.typeId] || 0);
+        })[0].typeId;
+      } else if (types.length > 0) {
+        assignedType = types.reduce((a, b) =>
+          (typeCount[s.id][a.id] || 0) <= (typeCount[s.id][b.id] || 0) ? a : b
+        ).id;
+      }
+      if (assignedType === null) continue;
+
+      sched[s.id][d] = assignedType;
+      typeCount[s.id][assignedType] = (typeCount[s.id][assignedType] || 0) + 1;
+      excess--;
+    }
+  });
+
   // ── 最終スロット充足チェック（Phase 5 修復完了後の確定状態で検証）────────────
   // Phase 3 では記録せず、すべての修復パスが終わった後に初めてチェックすることで
   // 「修復で解消済みなのに違反が残る」偽陽性を防ぐ
@@ -861,10 +898,14 @@ function generateSchedule(staff, types, daySlots, requests, prevWeekWork = {}, m
     });
 
     // 月の必須休日不足チェック（有給は含めない）
-    const offDays = DATES.filter(d => { const v = sched[s.id][d]; return v === "off" || v === null; }).length;
+    const offDays = DATES.filter(d => sched[s.id][d] === "off").length;
     if (offDays < (s.requiredDaysOff || 0))
       violations.push({ staffId: s.id, severity: "error",
         message: `${s.name}：月の休日（有給除く） ${offDays}日（必須 ${s.requiredDaysOff}日）` });
+    // 月の休日超過チェック（連勤・週休制約との競合により発生した超過を通知）
+    if (offDays > (s.requiredDaysOff || 0))
+      violations.push({ staffId: s.id, severity: "warning",
+        message: `${s.name}：月の休日 ${offDays}日（設定 ${s.requiredDaysOff}日）— 連勤・週休制約との競合により${offDays - (s.requiredDaysOff || 0)}日超過` });
 
     // 月の必須勤務日数不足チェック（補完パス後もなお未達 → 制約により達成不可）
     const actualWork = DATES.filter(d => isWorking(sched[s.id][d])).length;
@@ -1002,7 +1043,14 @@ function computeViolations(sched, staff, types, daySlots, requests, prevWeekWork
 function App() {
   const [tab,          setTab]          = useState("auto");
   const [staff,        setStaff]        = useState(() => loadLS("as_staff",    INIT_STAFF));
-  const [types,        setTypes]        = useState(() => loadLS("as_types",    INIT_TYPES));
+  const [types,        setTypes]        = useState(() => {
+    const loaded = loadLS("as_types", INIT_TYPES);
+    const toshi = { id: "C", name: "通し", color: "#10b981" };
+    // id:"C" 以外で名前が「通し」の古いエントリを除去し、id:"C" を先頭に保証
+    const others = loaded.filter(t => t.id !== "C" && t.name !== "通し");
+    const hasToshi = loaded.find(t => t.id === "C");
+    return [hasToshi ? { ...toshi, ...hasToshi } : toshi, ...others];
+  });
   const [daySlots,     setDaySlots]     = useState(() => {
     const raw = loadLS("as_daySlots", {});
     // 旧フォーマット移行: キーが数値ならば現在月でラップ
@@ -1842,7 +1890,7 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
                 {types.map(t => (
                   <span key={t.id} className="flex items-center gap-1">
                     <span className="w-3 h-3 rounded-sm inline-block" style={{backgroundColor:t.color}} />
-                    {t.name}（{t.start}〜{t.end}）
+                    {t.name}
                   </span>
                 ))}
                 <span className="flex items-center gap-1">
@@ -2047,7 +2095,9 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
                   const realOffDays = DAYS_IN_MONTH - workDays - paidDays;
                   // 月別上書きがあればそちらを優先して比較
                   const effReqOff   = (monthlyOverrides[s.id]?.requiredDaysOff ?? s.requiredDaysOff) || 0;
-                  const ok          = realOffDays >= effReqOff;
+                  const offExact    = realOffDays === effReqOff;
+                  const offOver     = realOffDays >  effReqOff;
+                  const offUnder    = realOffDays <  effReqOff;
                   return (
                     <tr key={s.id} className={`border-t ${si%2===0?"bg-white":"bg-gray-50"}`}>
                       <td className="px-3 py-2 font-medium text-gray-800">{s.name}</td>
@@ -2074,8 +2124,10 @@ function AutoGenTab({ staff, types, setTypes, daySlots, requests,
                       <td className="px-3 py-2 text-center font-bold text-gray-700">{workDays}</td>
                       <td className="px-3 py-2 text-center text-gray-500">{realOffDays}</td>
                       <td className="px-3 py-2 text-center">
-                        <span className={`text-xs font-bold ${ok ? "text-green-600" : "text-red-600"}`}>
-                          {ok ? `✓ ${realOffDays}日` : `⚠ ${realOffDays}/${effReqOff}日`}
+                        <span className={`text-xs font-bold ${offExact ? "text-green-600" : offUnder ? "text-red-600" : "text-orange-500"}`}>
+                          {offExact ? `✓ ${realOffDays}日`
+                            : offUnder ? `⚠ ${realOffDays}/${effReqOff}日`
+                            : `▲ ${realOffDays}日（+${realOffDays - effReqOff}）`}
                         </span>
                       </td>
                     </tr>
@@ -2125,7 +2177,7 @@ function PrintArea({ sched, staff, types, daySlots, violations, memos, memoLabel
           </div>
           <div style={{fontSize:"8px",color:"#555",marginTop:"1px",display:"flex",gap:"10px"}}>
             {types.map(t=>(
-              <span key={t.id} style={{color:t.color}}>● {t.name}（{t.start}〜{t.end}）</span>
+              <span key={t.id} style={{color:t.color}}>● {t.name}</span>
             ))}
             <span style={{color:PAID_COLOR}}>● 有（有給）</span>
             <span style={{color:"#9ca3af"}}>休＝休み</span>
@@ -2442,14 +2494,14 @@ function SlotsTab({ types, setTypes, daySlots, setDaySlots, staff, requests, set
   const [editTypeId,  setEditTypeId]  = useState(null);
   const [typeForm,    setTypeForm]    = useState({});
   const [showAddType, setShowAddType] = useState(false);
-  const [newType,     setNewType]     = useState({name:"",start:"09:00",end:"17:00",color:"#6366f1"});
+  const [newType,     setNewType]     = useState({name:"",color:"#6366f1"});
 
   function startEditType(t) { setEditTypeId(t.id); setTypeForm({...t}); }
   function saveType()        { setTypes(p=>p.map(t=>t.id===editTypeId?{...typeForm}:t)); setEditTypeId(null); }
   function addType()         {
     if (!newType.name) return;
     setTypes(p=>[...p,{...newType,id:`T${Date.now()}`}]);
-    setNewType({name:"",start:"09:00",end:"17:00",color:"#6366f1"}); setShowAddType(false);
+    setNewType({name:"",color:"#6366f1"}); setShowAddType(false);
   }
   const [applyDone,    setApplyDone]   = useState(false);
   const [selDay,       setSelDay]      = useState(1);
@@ -2507,7 +2559,7 @@ function SlotsTab({ types, setTypes, daySlots, setDaySlots, staff, requests, set
           className="w-full flex items-center justify-between px-4 py-3 text-sm font-semibold text-gray-700 hover:bg-gray-50 transition-colors">
           <span className="flex items-center gap-2">
             🗂 シフト種別管理
-            <span className="text-xs font-normal text-gray-400">（名前・時間・カラーを設定）</span>
+            <span className="text-xs font-normal text-gray-400">（名前・カラーを設定。「通し」は常に必須）</span>
             {types.length > 0 && (
               <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-bold">{types.length}種別</span>
             )}
@@ -2521,13 +2573,10 @@ function SlotsTab({ types, setTypes, daySlots, setDaySlots, staff, requests, set
                 <div key={t.id}>
                   {editTypeId===t.id?(
                     <div className="p-3 bg-gray-50 rounded-lg border border-blue-200 space-y-2">
-                      <input className="border rounded px-2 py-1 w-full text-sm" value={typeForm.name} onChange={e=>setTypeForm(f=>({...f,name:e.target.value}))} placeholder="シフト名" />
-                      <div className="grid grid-cols-2 gap-2">
-                        <div><label className="text-xs text-gray-500 block mb-0.5">開始時間</label>
-                          <input type="time" className="border rounded px-2 py-1 w-full text-sm" value={typeForm.start} onChange={e=>setTypeForm(f=>({...f,start:e.target.value}))} /></div>
-                        <div><label className="text-xs text-gray-500 block mb-0.5">終了時間</label>
-                          <input type="time" className="border rounded px-2 py-1 w-full text-sm" value={typeForm.end} onChange={e=>setTypeForm(f=>({...f,end:e.target.value}))} /></div>
-                      </div>
+                      <input className="border rounded px-2 py-1 w-full text-sm" value={typeForm.name}
+                        onChange={e=>setTypeForm(f=>({...f,name:e.target.value}))} placeholder="シフト名"
+                        disabled={t.id==="C"} />
+                      {t.id==="C" && <p className="text-xs text-gray-400">※「通し」の名前は変更できません</p>}
                       <div className="flex items-center gap-2">
                         <label className="text-xs text-gray-500">カラー</label>
                         <input type="color" className="w-9 h-9 rounded cursor-pointer border" value={typeForm.color} onChange={e=>setTypeForm(f=>({...f,color:e.target.value}))} />
@@ -2542,11 +2591,13 @@ function SlotsTab({ types, setTypes, daySlots, setDaySlots, staff, requests, set
                     <div className="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-gray-50 group border border-transparent hover:border-gray-200 transition-all">
                       <div className="flex items-center gap-2.5">
                         <span className="px-2.5 py-0.5 rounded-full text-white text-xs font-bold shadow-sm" style={{backgroundColor:t.color}}>{t.name}</span>
-                        <span className="text-xs text-gray-400">{t.start} 〜 {t.end}</span>
+                        {t.id==="C" && <span className="text-xs text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded">自動生成用・削除不可</span>}
                       </div>
                       <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                         <button onClick={()=>startEditType(t)} className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200">編集</button>
-                        <button onClick={()=>setTypes(p=>p.filter(x=>x.id!==t.id))} className="text-xs bg-red-100 text-red-600 px-2 py-1 rounded hover:bg-red-200">削除</button>
+                        {t.id !== "C" && (
+                          <button onClick={()=>setTypes(p=>p.filter(x=>x.id!==t.id))} className="text-xs bg-red-100 text-red-600 px-2 py-1 rounded hover:bg-red-200">削除</button>
+                        )}
                       </div>
                     </div>
                   )}
@@ -2555,13 +2606,8 @@ function SlotsTab({ types, setTypes, daySlots, setDaySlots, staff, requests, set
             </div>
             {showAddType?(
               <div className="mt-3 p-3 bg-blue-50 rounded-lg border border-blue-200 space-y-2">
-                <input className="border rounded px-2 py-1 w-full text-sm" value={newType.name} onChange={e=>setNewType(n=>({...n,name:e.target.value}))} placeholder="例：夜番" />
-                <div className="grid grid-cols-2 gap-2">
-                  <div><label className="text-xs text-gray-500 block mb-0.5">開始</label>
-                    <input type="time" className="border rounded px-2 py-1 w-full text-sm" value={newType.start} onChange={e=>setNewType(n=>({...n,start:e.target.value}))} /></div>
-                  <div><label className="text-xs text-gray-500 block mb-0.5">終了</label>
-                    <input type="time" className="border rounded px-2 py-1 w-full text-sm" value={newType.end} onChange={e=>setNewType(n=>({...n,end:e.target.value}))} /></div>
-                </div>
+                <p className="text-xs text-gray-500">追加したシフト種別は手動で割り当てできます（自動生成では「通し」のみ使用）</p>
+                <input className="border rounded px-2 py-1 w-full text-sm" value={newType.name} onChange={e=>setNewType(n=>({...n,name:e.target.value}))} placeholder="例：早番" />
                 <div className="flex items-center gap-2">
                   <label className="text-xs text-gray-500">カラー</label>
                   <input type="color" className="w-9 h-9 rounded cursor-pointer border" value={newType.color} onChange={e=>setNewType(n=>({...n,color:e.target.value}))} />
