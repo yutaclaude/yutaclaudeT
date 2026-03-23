@@ -2690,6 +2690,18 @@ function SlotsTab({ types, setTypes, daySlots, setDaySlots, staff, requests, set
 
   return (
     <div>
+      {/* ─ 使い方 ─ */}
+      <div className="mb-4 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 text-sm text-blue-900">
+        <p className="font-bold text-blue-700 mb-1.5">このタブの使い方</p>
+        <ol className="list-decimal list-inside space-y-1">
+          <li>店舗で必要な勤務体系を作成（例：早番・遅番）</li>
+          <li>「通し」で必要人数を設定する</li>
+        </ol>
+        <p className="mt-2 text-xs text-blue-600 bg-blue-100 rounded-lg px-3 py-1.5 leading-relaxed">
+          <span className="font-bold">注意：</span>ここでは必ず「通し」だけで人数を設定してください。早番・遅番の割り当ては「③ 自動生成」タブで手動調整します。
+        </p>
+      </div>
+
       {/* ─ シフト種別管理（折りたたみ） ─ */}
       <div className="mb-4 bg-white border border-gray-200 rounded-xl overflow-hidden">
         <button
